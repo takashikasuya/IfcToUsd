@@ -1,1 +1,4 @@
 .git
+.ipynb_checkpoints/*
+files/*
+output/*
