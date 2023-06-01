@@ -2,3 +2,5 @@
 .ipynb_checkpoints/*
 files/*
 output/*
+pymorton.py
+__pycache__/*
