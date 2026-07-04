@@ -35,6 +35,16 @@ uv run python -m ifc2usd files/ToyodaLab.ifc
 | `--y-up` | Y-UP 軸で出力（既定は IFC 標準の Z-UP） |
 | `-v, --verbose` | 詳細ログを出力 |
 
+## テスト
+
+小さな合成フィクスチャ（Site/Building/Storey に色付きの壁2枚）を変換し、座標系・階層・
+ジオメトリ・マテリアルを検証する E2E テストを同梱している。外部データ不要で動く。
+
+```bash
+uv run pytest                              # 変換テストの実行
+uv run python tests/generate_fixture.py    # tests/fixtures/minimal.ifc の再生成
+```
+
 ## 出力の確認
 
 生成された USD は以下で開ける:

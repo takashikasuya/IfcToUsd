@@ -107,8 +107,9 @@ def append_prim(stage, props: dict, path: str, geometries: dict, material_prims:
         # 変換行列 (3x3 回転 + 平行移動) を分解する
         rows = [(t[i], t[i + 1], t[i + 2]) for i in range(0, 12, 3)]
         offset = rows[3]
-        rotation = np.matrix((rows[0], rows[1], rows[2])).T
-        geom_data[1] = [np.ravel(np.dot(rotation, np.array(vert))).tolist() for vert in verts]
+        # rows[0:3] は X/Y/Z 基底ベクトル。列に並べて回転行列とし各頂点へ適用する
+        rotation = np.asarray((rows[0], rows[1], rows[2])).T
+        geom_data[1] = [rotation.dot(vert).tolist() for vert in verts]
 
         UsdGeom.XformCommonAPI(prim).SetTranslate(offset)
         Usd.ModelAPI(prim).SetKind(Kind.Tokens.component)

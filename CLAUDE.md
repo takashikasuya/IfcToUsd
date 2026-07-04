@@ -12,15 +12,20 @@ metadata stored as USD `customData` (GUID, class, name, latitude/longitude).
 ## Commands
 
 ```bash
-uv sync                                   # create .venv and install deps from pyproject.toml
+uv sync                                   # create .venv and install deps (incl. dev group)
 uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.usda
 uv run ifc2usd <ifc> -o <out.usda> --y-up --verbose
 uv run python -m ifc2usd <ifc>            # equivalent module entry point
+uv run pytest                             # run the end-to-end conversion tests
+uv run python tests/generate_fixture.py   # regenerate tests/fixtures/minimal.ifc
 ```
 
-There is no test suite or linter configured. Verify changes end-to-end by running the CLI
-on `files/ToyodaLab.ifc` (tracked, ~2.8MB) and opening the result with `pxr.Usd.Stage.Open`
-(check `upAxis`, `metersPerUnit`, mesh/material counts, and a non-degenerate world bbox).
+Tests live in `tests/` and are the primary verification path. `tests/generate_fixture.py`
+synthesizes a tiny IFC (two colored walls in a Site/Building/Storey) via the ifcopenshell 0.8
+authoring API; `tests/test_convert.py` converts it and asserts on up-axis, hierarchy, world
+extent, per-wall colors/material bindings, and customData. The committed
+`tests/fixtures/minimal.ifc` lets tests run without the large `files/ToyodaLab.ifc`
+(tracked, ~2.8MB) — use that real model for eyeballing bigger changes. No linter is configured.
 
 ## Architecture
 
