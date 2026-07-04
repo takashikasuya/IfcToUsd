@@ -211,11 +211,35 @@ const voxelRoot = new THREE.Group();
 modelRoot.add(voxelRoot);
 const voxelLods = [];
 
+// JSのシフト演算子(<<, >>)はシフト量を32で割った余りとして扱うため、シフト量が
+// 32以上になると0を返さずラップアラウンドしてしまう（コード自体が32bitに収まる
+// かどうかとは別の制約）。ループは `code >> (3*i)` が0になるまで回るため、コードの
+// 最上位ビット位置Lに対し最終的に評価するシフト量は 3*ceil(L/3) になる。これが
+// 31以下に収まる最大のLは30（ceil(30/3)*3=30）なので、閾値は2^30-1に取る
+// （2^31-1まで許すと31bit境界でシフト量が33になりラップアラウンドして壊れる）。
+const _MORTON_FAST_PATH_MAX_CODE = 0x3fffffff;
+
 function mortonDecode(code) {
+  if (code <= _MORTON_FAST_PATH_MAX_CODE) {
+    // 大半のコード(10bit/軸強まで)は普通のNumberでのビット演算で十分正確かつ高速。
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    let i = 0;
+    while (code >> (3 * i) > 0) {
+      x |= ((code >> (3 * i)) & 1) << i;
+      y |= ((code >> (3 * i + 1)) & 1) << i;
+      z |= ((code >> (3 * i + 2)) & 1) << i;
+      i += 1;
+    }
+    return [x, y, z];
+  }
+
   // spec.md §2は3軸21bitまで(=最大63bit)のMortonコードを許容するが、JSのビット
   // 演算子(<<, |, &)は32bit符号付き整数に丸められ、それを超えるビットが破壊される。
   // ifc2usd/voxel.py の morton_decode と同じアルゴリズムをBigIntで実装し直すことで、
-  // 63bit全域を精度劣化・破壊なく復元できるようにする。
+  // 63bit全域を精度劣化・破壊なく復元できるようにする（上のfast pathを超えた
+  // まれなケースのみ、より遅いBigIntを使う）。
   let c = BigInt(code);
   let x = 0n;
   let y = 0n;
@@ -394,7 +418,14 @@ async function loadScene() {
   renderTree(sceneDescription.tree);
 
   if (sceneDescription.assets.voxels) {
-    await loadVoxels(sceneDescription.assets.voxels);
+    // ボクセルはメッシュ表示にとって付加的な情報（サーバー側もvoxels.jsonが
+    // 無ければassetsから省く設計）なので、読み込み失敗はメッシュ表示自体を
+    // 巻き込んではいけない。ここだけ個別にcatchし、警告に留めて続行する。
+    try {
+      await loadVoxels(sceneDescription.assets.voxels);
+    } catch (error) {
+      console.warn("ifc2usd viewer: failed to load voxels, continuing without them", error);
+    }
   }
 
   return sceneDescription;
@@ -421,6 +452,7 @@ window.ifc2usdViewer = {
   selectByGuid,
   getSelectedGuid: () => selectedGuid,
   voxelLods,
+  mortonDecode,
 };
 
 resize();

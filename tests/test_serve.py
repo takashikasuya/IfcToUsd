@@ -98,6 +98,34 @@ def test_build_serve_directory_omits_voxels_asset_when_no_elements(tmp_path):
     assert "voxels" not in scene["assets"]
 
 
+def test_build_serve_directory_omits_voxels_asset_when_elements_have_no_vertices(tmp_path):
+    """elements_from_stageはGUID+class customDataとmesh子primがあれば要素を返すが、
+    頂点0件の退化メッシュも要素として拾いうる。全要素が頂点0件だと
+    build_voxel_json内部のscene_originがValueErrorで落ちるため、その手前で
+    voxels.json自体を省略できることを確認する（「elementsがあるかどうか」ではなく
+    「頂点を持つ要素があるかどうか」で判定する必要がある回帰テスト）。"""
+    from pxr import Usd, UsdGeom
+
+    no_vertices_usda = tmp_path / "no_vertices.usda"
+    stage = Usd.Stage.CreateNew(str(no_vertices_usda))
+    root = UsdGeom.Xform.Define(stage, "/Model")
+    stage.SetDefaultPrim(root.GetPrim())
+
+    element = UsdGeom.Xform.Define(stage, "/Model/Element")
+    element.GetPrim().SetCustomDataByKey("GUID", "degenerate-guid")
+    element.GetPrim().SetCustomDataByKey("class", "IfcWall")
+    # customData付きのmesh子primはあるが、頂点は1つも無い(退化メッシュ)。
+    UsdGeom.Mesh.Define(stage, "/Model/Element/mesh")
+    stage.GetRootLayer().Save()
+
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(no_vertices_usda, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    assert "voxels" not in scene["assets"]
+
+
 def test_build_serve_directory_copies_viewer_assets(usda, tmp_path):
     workdir = tmp_path / "www"
     workdir.mkdir()

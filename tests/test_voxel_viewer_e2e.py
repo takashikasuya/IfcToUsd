@@ -117,6 +117,34 @@ def test_voxel_instance_positions_match_origin_plus_index_times_size(page, serve
     assert {tuple(p) for p in actual} == expected
 
 
+def test_morton_decode_matches_python_reference_across_fast_and_bigint_paths(page, served_url):
+    """viewer.jsのmortonDecodeは閾値以下を通常のNumberビット演算、それを超える
+    コードをBigIntで処理する2パス構成（速度対策）。両パスとも既にテスト済みの
+    Python側morton_decodeと一致することを確認する。
+
+    境界値のテストは重要: JSのシフト演算子はシフト量を32で余りを取るため、
+    「コードが32bitに収まるかどうか」ではなく「ループが必要とする最大シフト量が
+    31以下か」が閾値の条件になる（2^30-1なら安全、2^31-1だとシフト量33への
+    ラップアラウンドで壊れる。これは実際にこのテストで一度検出したバグ）。"""
+    _wait_for_load(page, served_url)
+
+    codes = [
+        0,
+        1,
+        0x3FFFFFFF,  # fast pathの境界値ちょうど（2^30-1）
+        0x40000000,  # BigInt pathへ切り替わる直後
+        0x7FFFFFFF,  # 旧・誤った閾値だった値（ここでBigInt pathに入ることを確認）
+        (1 << 62) - 1,  # 21bit/軸に近い大きな値。Number.MAX_SAFE_INTEGERを超えるため
+        # JS側にはBigIntリテラル("n"サフィックス)として渡さないと、引数自体が
+        # doubleへの変換で精度落ちしてしまい正しくテストできない。
+    ]
+    for code in codes:
+        expected = list(morton_decode(code))
+        js_literal = f"{code}n" if code > (2**53 - 1) else str(code)
+        actual = page.evaluate(f"window.ifc2usdViewer.mortonDecode({js_literal})")
+        assert actual == expected, f"code={code}"
+
+
 def test_voxel_instance_colors_match_element_color(page, served_url):
     _wait_for_load(page, served_url)
 
@@ -204,6 +232,31 @@ def test_multiple_lods_only_first_visible_by_default(browser, tmp_path):
 
         visibilities = page.evaluate("window.ifc2usdViewer.voxelLods.map(l => l.mesh.visible)")
         assert visibilities == [True, False]
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_broken_voxels_json_degrades_to_mesh_only(browser, tmp_path):
+    """voxels.jsonの読み込み・パースに失敗しても、メッシュ表示自体は壊れず
+    ロードが完了すること（ボクセルはあくまで付加的な情報という設計）。"""
+    server, thread, url, workdir = _serve(tmp_path, "www_broken_voxels")
+    try:
+        voxels_files = list(workdir.glob("*_voxels.json"))
+        assert len(voxels_files) == 1
+        voxels_files[0].write_text("not valid json {{{", encoding="utf-8")
+
+        page = browser.new_page(viewport={"width": 800, "height": 600})
+        errors = []
+        page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+        _wait_for_load(page, url)
+
+        assert page.evaluate("window.ifc2usdViewer.voxelLods.length") == 0
+        # メッシュは通常通りロードされている（エラーバナーは出ない）
+        assert page.evaluate("window.ifc2usdViewer.modelRoot.children.length") > 0
+        assert page.locator("#load-error-banner").count() == 0
+        assert errors == []  # console.warnのみで、console.errorは出ない
         page.close()
     finally:
         server.shutdown()

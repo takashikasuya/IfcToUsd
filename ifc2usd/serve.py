@@ -66,7 +66,11 @@ def build_serve_directory(
 
     assets = {"gltf": glb_name}
     elements = elements_from_stage(stage)
-    if elements:
+    # elements_from_stage は customData(GUID/class) と mesh子prim があれば要素を
+    # 返すが、頂点0件の退化メッシュも含みうる。全要素が頂点0件だと
+    # build_voxel_json -> scene_origin が ValueError で落ちてしまうため、
+    # 頂点を持つ要素が1つもなければ voxels.json 自体を省略する。
+    if any(len(el.vertices) for el in elements):
         voxels_name = f"{usd_path.stem}_voxels.json"
         voxels = build_voxel_json(
             elements,
