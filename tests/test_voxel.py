@@ -12,7 +12,9 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
+import trimesh
 from pxr import Gf, Usd, UsdGeom
 
 from ifc2usd import convert
@@ -132,3 +134,67 @@ def test_voxelize_fill_mode_matches_surface_for_thin_wall(stage):
     _, fill_voxels = voxelize_mesh(vertices, indices, size, fill=True)
 
     assert fill_voxels == surface_voxels
+
+
+# --- 格子サイズと寸法がちょうど整数倍で揃う退化ケース ---
+
+
+def _duplicated_vertex_box(extents, translation) -> tuple[list, list]:
+    """weld-vertices=False を模した、面ごとに独立した頂点を持つボックスメッシュ。"""
+    box = trimesh.creation.box(extents=extents)
+    box.apply_translation(translation)
+    verts = box.vertices[box.faces].reshape(-1, 3)
+    indices = np.arange(len(verts))
+    return verts.tolist(), indices.tolist()
+
+
+def test_voxelize_surface_of_grid_aligned_cube_is_not_empty():
+    """全ての面がちょうど格子線上に乗る形状（例: 1m立方体を0.5m格子で処理）でも
+    表面が消失しない（各面がメッシュ全体の下端/上端かどうかで一意に解決される）。"""
+    vertices, indices = _duplicated_vertex_box([1.0, 1.0, 1.0], [0.5, 0.5, 0.5])
+    size = 0.5
+
+    _, surface = voxelize_mesh(vertices, indices, size)
+
+    # 1m立方体を0.5m格子（2x2x2=8セル）で処理すると、全セルが境界面に触れる
+    assert len(surface) == 8
+    assert {ix for ix, _, _ in surface} == {0, 1}
+    assert {iy for _, iy, _ in surface} == {0, 1}
+    assert {iz for _, _, iz in surface} == {0, 1}
+
+
+def test_voxelize_fill_of_grid_aligned_cube_fills_interior():
+    vertices, indices = _duplicated_vertex_box([1.0, 1.0, 1.0], [0.5, 0.5, 0.5])
+    size = 0.25  # 4x4x4=64セル、中心2x2x2=8セルが内部
+
+    _, surface = voxelize_mesh(vertices, indices, size)
+    _, filled = voxelize_mesh(vertices, indices, size, fill=True)
+
+    assert len(surface) == 64 - 8  # 中空シェル
+    assert len(filled) == 64  # 内部充填で全セル
+
+
+# --- 入力検証 ---
+
+
+def test_voxelize_rejects_non_positive_size(stage):
+    vertices, indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
+    with pytest.raises(ValueError):
+        voxelize_mesh(vertices, indices, size=0)
+    with pytest.raises(ValueError):
+        voxelize_mesh(vertices, indices, size=-0.5)
+
+
+def test_voxelize_rejects_non_finite_vertices(stage):
+    vertices, indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
+    bad_vertices = list(vertices)
+    bad_vertices[0] = (float("nan"), 0.0, 0.0)
+    with pytest.raises(ValueError):
+        voxelize_mesh(bad_vertices, indices, size=0.5)
+
+
+def test_voxelize_rejects_origin_above_mesh_bounds(stage):
+    """共有originはメッシュ自身の範囲を含んでいなければならない。"""
+    vertices, indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
+    with pytest.raises(ValueError):
+        voxelize_mesh(vertices, indices, size=0.5, origin=(10.0, 10.0, 10.0))

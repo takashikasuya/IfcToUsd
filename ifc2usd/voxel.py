@@ -9,11 +9,14 @@ Morton符号化はビット桁のインタリーブによる自前実装。
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Sequence
 
 import numpy as np
 import trimesh
+
+logger = logging.getLogger("ifc2usd")
 
 
 def morton_encode(x: int, y: int, z: int) -> int:
@@ -45,10 +48,6 @@ def morton_decode(code: int) -> tuple[int, int, int]:
     return x, y, z
 
 
-def _mesh_bounds(vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return vertices.min(axis=0), vertices.max(axis=0)
-
-
 def _snap_to_integer(value: np.ndarray, tol: float = 1e-9) -> np.ndarray:
     """浮動小数点誤差で格子線からわずかにずれた値を、最も近い整数へ吸着させる。"""
     rounded = np.round(value)
@@ -61,10 +60,27 @@ def _surface_voxels(
     """各三角形のAABBが格子セルの開区間と重なるものを占有とみなす。
 
     セル i は開区間 (i*size, (i+1)*size) を占有領域とする。三角形のAABBが
-    ちょうど格子線上に乗る退化面（厚み0）は、その軸で空区間（lo>hi）となり
-    寄与しない ── 閉多面体では隣接する非退化面が同じ境界セルを別途カバーする
-    ため、表面占有としては欠落しない。
+    ちょうど格子線上に乗る退化面（厚み0、例: 軸並行ボックスの各面）は、
+    素朴な開区間判定では空区間（lo>hi）になり得る ── その値がメッシュ全体の
+    下端/上端と一致するなら「材質はその側にしかない」ことが確定するので
+    一意に解決できる（下端なら格子線の上のセル、上端なら下のセルに属する）。
+    どちらとも一致しない内部の退化面（稀）は、安全側として両隣接セルに含める。
+    このメッシュ全体の下端/上端判定がないと、寸法が格子サイズの整数倍に
+    ちょうど揃った形状（例: 1m立方体を0.5m格子で処理）で全面が退化面かつ
+    格子線上に乗り、表面が丸ごと消失するバグになる。
+
+    既知の制限: 判定はAABB単位であり、真の三角形-ボックス交差判定ではない。
+    軸並行な形状（壁・床など典型的なBIM要素）ではAABBが実際の面と一致するため
+    厳密だが、斜めの三角形（傾斜屋根・筋交いなど）ではAABBが実面より広くなり、
+    占有ボクセルを過大評価する（false positive）。
+
+    呼び出し側（voxelize_mesh）で `origin` がメッシュのAABB最小点以下である
+    ことを検証済みのため、ここでは格子インデックスが負にならない前提で計算する。
     """
+    mesh_min = vertices.min(axis=0)
+    mesh_max = vertices.max(axis=0)
+    tol = 1e-9
+
     voxels: set[tuple[int, int, int]] = set()
     for tri in triangles:
         tri_verts = vertices[tri]
@@ -72,8 +88,23 @@ def _surface_voxels(
         tri_max = tri_verts.max(axis=0)
         lo_raw = _snap_to_integer((tri_min - origin) / size)
         hi_raw = _snap_to_integer((tri_max - origin) / size)
-        lo = np.maximum(np.floor(lo_raw), 0).astype(int)
+        lo = np.floor(lo_raw).astype(int)
         hi = (np.ceil(hi_raw) - 1).astype(int)
+
+        for axis in range(3):
+            if hi[axis] >= lo[axis]:
+                continue
+            k = lo[axis]  # 格子線の整数位置（degenerate点 = k*size）
+            value = tri_min[axis]
+            if math.isclose(value, mesh_min[axis], abs_tol=tol):
+                lo[axis] = hi[axis] = k
+            elif math.isclose(value, mesh_max[axis], abs_tol=tol):
+                lo[axis] = hi[axis] = k - 1
+            else:
+                lo[axis] = max(k - 1, 0)
+                hi[axis] = k
+
+        lo = np.maximum(lo, 0)
         if np.any(hi < lo):
             continue
         for ix in range(lo[0], hi[0] + 1):
@@ -131,19 +162,42 @@ def voxelize_mesh(
 
     Returns:
         (使用した origin, 占有格子インデックス (ix, iy, iz) の集合)
+
+    Raises:
+        ValueError: `size` が正でない、頂点に非有限値（NaN/Inf）が含まれる、
+            または指定 `origin` がメッシュのAABB最小点を上回っている場合
+            （シーン共有originはメッシュ自身の範囲を含んでいなければならない）。
     """
+    if size <= 0:
+        raise ValueError(f"size must be positive, got {size}")
+
     verts = np.asarray(vertices, dtype=np.float64)
+    if not np.all(np.isfinite(verts)):
+        raise ValueError("vertices must be finite (no NaN/Inf)")
     triangles = np.asarray(indices, dtype=np.int64).reshape(-1, 3)
 
+    mesh_min = verts.min(axis=0)
     if origin is None:
-        origin_arr, _ = _mesh_bounds(verts)
+        origin_arr = mesh_min
     else:
         origin_arr = np.asarray(origin, dtype=np.float64)
+        if np.any(mesh_min < origin_arr - 1e-9):
+            raise ValueError(
+                f"origin {tuple(origin_arr)} must be <= the mesh's own bounds min {tuple(mesh_min)}"
+            )
 
     surface = _surface_voxels(verts, triangles, size, origin_arr)
 
     if fill:
-        mesh = trimesh.Trimesh(vertices=verts, faces=triangles, process=False)
+        # process=True（既定）で頂点溶接・退化面除去を行う。ifc.py は
+        # weld-vertices=False で法線を保持するため、各面が独自の頂点を持ち
+        # 未処理では非水密メッシュとなり mesh.contains() が信頼できない。
+        mesh = trimesh.Trimesh(vertices=verts, faces=triangles)
+        if not mesh.is_watertight:
+            logger.warning(
+                "voxelize_mesh: mesh is not watertight after processing; "
+                "fill=True interior detection may be unreliable"
+            )
         occupied = _fill_voxels(mesh, surface, size, origin_arr)
     else:
         occupied = surface
