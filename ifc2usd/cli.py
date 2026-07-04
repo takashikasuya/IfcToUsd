@@ -24,9 +24,6 @@ from .usd import build_stage
 
 logger = logging.getLogger("ifc2usd")
 
-# 既知のサブコマンド名。先頭引数がこれに一致しない場合は "convert" を補って後方互換を保つ。
-_SUBCOMMANDS = ("convert",)
-
 
 def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
     """IFC ファイルを構造化された USD ステージへ変換して書き出す。"""
@@ -66,6 +63,10 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run_convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     if not args.ifc_path.is_file():
         parser.error(f"IFC file not found: {args.ifc_path}")
 
@@ -74,26 +75,48 @@ def _run_convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
     return 0
 
 
+# サブコマンド名 -> (引数登録関数, 実行関数, help文字列)。
+# _build_parser と _normalize_argv の両方がここを唯一の正本として参照するため、
+# 新しいサブコマンド（voxelize/export-gltf/serve）を追加する際はここに1エントリ
+# 加えるだけでよく、登録漏れによる `args._run` の AttributeError や
+# `_normalize_argv` の判定漏れが構造的に起きない。
+_COMMANDS: dict[str, tuple] = {
+    "convert": (
+        _add_convert_arguments,
+        _run_convert,
+        "Convert an IFC model into a structured OpenUSD stage (default command).",
+    ),
+}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ifc2usd", description="Convert an IFC model into a structured OpenUSD stage."
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    convert_parser = subparsers.add_parser(
-        "convert", help="Convert an IFC model into a structured OpenUSD stage (default command)."
-    )
-    _add_convert_arguments(convert_parser)
-    convert_parser.set_defaults(_run=_run_convert, _parser=convert_parser)
+    for name, (add_arguments, run, help_text) in _COMMANDS.items():
+        subparser = subparsers.add_parser(name, help=help_text)
+        add_arguments(subparser)
+        subparser.set_defaults(_run=run, _parser=subparser)
 
     return parser
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
-    """サブコマンド省略時（旧来の呼び出し）に "convert" を補う。"""
+    """サブコマンド省略時（旧来の呼び出し）に "convert" を補う。
+
+    既知の制限: 先頭引数がサブコマンド名（例 "convert"）と完全に一致する場合は
+    サブコマンド呼び出しとして扱う。ただし、その名前と同名のファイルが実在する
+    場合（例: 拡張子なしで "convert" という名前の IFC ファイル）は、パスとして
+    扱う旧来呼び出しを優先する。
+    """
     if not argv:
         return argv
-    if argv[0] in _SUBCOMMANDS or argv[0] in ("-h", "--help"):
+    first = argv[0]
+    if first in ("-h", "--help"):
+        return argv
+    if first in _COMMANDS and not Path(first).is_file():
         return argv
     return ["convert", *argv]
 
@@ -107,11 +130,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if getattr(args, "command", None) is None:
         parser.error("a command is required (e.g. 'convert')")
-
-    logging.basicConfig(
-        level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
 
     return args._run(args, args._parser)
 

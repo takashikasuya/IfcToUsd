@@ -1,8 +1,8 @@
 """CLI サブコマンド構成の回帰テスト。
 
-`ifc2usd/cli.py` は `convert`/`voxelize`/`export-gltf`/`serve` のサブコマンド構成に
-リファクタされたが、サブコマンド省略時の旧来の呼び出し (`ifc2usd <ifc> ...`) は
-`convert` として扱われる後方互換を維持する。
+`ifc2usd/cli.py` は `convert` サブコマンドを持つ（`voxelize`/`export-gltf`/`serve`
+は今後のIssueで追加予定）。サブコマンド省略時の旧来の呼び出し (`ifc2usd <ifc> ...`)
+は `convert` として扱われる後方互換を維持する。
 """
 
 from __future__ import annotations
@@ -76,6 +76,18 @@ def test_empty_argv_errors():
     with pytest.raises(SystemExit) as excinfo:
         main([])
     assert excinfo.value.code != 0
+
+
+def test_legacy_invocation_with_ifc_path_named_like_a_subcommand(monkeypatch, tmp_path):
+    """パスがサブコマンド名と同名でも、実在するファイルなら旧来呼び出しとして扱う。"""
+    monkeypatch.chdir(tmp_path)
+    ifc_named_convert = tmp_path / "convert"
+    ifc_named_convert.write_bytes(FIXTURE.read_bytes())
+
+    out = tmp_path / "out.usda"
+    exit_code = main(["convert", "-o", str(out)])
+    assert exit_code == 0
+    assert out.is_file()
 
 
 def test_default_output_path_without_subcommand(monkeypatch, tmp_path):
