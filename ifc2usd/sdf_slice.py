@@ -29,9 +29,20 @@ logger = logging.getLogger("ifc2usd")
 _JSON_VERSION = 1
 
 # 1要素・1スライスあたりのグリッドセル数上限。フロア全体を覆うような巨大要素でも
-# メモリ・JSONサイズが際限なく膨らまないようにする安全弁。超過した要素はスライスを
+# JSONサイズが際限なく膨らまないようにする安全弁。超過した要素はスライスを
 # 生成せず、その旨をログに残す（出力から静かに欠落させると原因を追えなくなるため）。
+#
+# これはXY足跡（出力サイズ）だけを抑える安全弁であり、build_narrow_band_sdf内部の
+# 総当たり距離計算（O(dilate後候補数 x 表面ボクセル数)）の支配的コストは表面ボクセル数
+# そのもの（3次元、Z方向にいくら伸びても足跡には現れない）に由来する。例えば
+# 断面2x2セル・高さ1000セルの細長い柱は cols*rows=4 でこの上限を通過するが、
+# 表面ボクセル数は約4000にもなり得るため、下の_MAX_SURFACE_VOXELSで別途抑える。
 _MAX_GRID_CELLS = 40_000
+
+# 1要素あたりの表面ボクセル数上限（上記の通りcols*rowsでは捉えられないコストの
+# 安全弁）。実データ（ToyodaLab.ifc）で観測された実要素は数百〜1000弱程度のため、
+# 数倍の余裕を持たせた値にする。
+_MAX_SURFACE_VOXELS = 2_000
 
 
 def build_sdf_slices_json(
@@ -55,8 +66,13 @@ def build_sdf_slices_json(
         ``{"version": 1, "size": size, "elements": {guid: {cols, rows, originX,
         originY, size, slices: [{z, values}]}}}``。``values`` は
         ``rows`` 行 x ``cols`` 列の符号付き距離値（narrow-band外は ``None``）。
-        頂点が無い要素、表面ボクセルが0個の要素、グリッドセル数が
-        `_MAX_GRID_CELLS` を超える要素はスキップする。
+        グリッドは表面ボクセルのXYバウンディングボックスに限定するため、
+        `band_width` で外側へ広がったnarrow-band自体（表面から離れた外部の
+        clearance値）はこのグリッドの外側では切り捨てられる（要素の輪郭より
+        外側まで含めた「周囲の場」を見せる用途ではなく、要素自身の断面を見せる
+        用途のため）。頂点が無い要素、表面ボクセルが0個の要素、表面ボクセル数が
+        `_MAX_SURFACE_VOXELS` を超える要素、グリッドセル数が `_MAX_GRID_CELLS`
+        を超える要素はスキップする。
     """
     result_elements: dict[str, dict] = {}
 
@@ -66,6 +82,12 @@ def build_sdf_slices_json(
 
         origin, surface_voxels = voxelize_mesh(el.vertices, el.indices, size=size, fill=False)
         if not surface_voxels:
+            continue
+        if len(surface_voxels) > _MAX_SURFACE_VOXELS:
+            logger.warning(
+                "build_sdf_slices_json: skipping element %s (%d surface voxels exceeds %d-voxel cap)",
+                el.guid, len(surface_voxels), _MAX_SURFACE_VOXELS,
+            )
             continue
         _, solid_voxels = voxelize_mesh(el.vertices, el.indices, size=size, origin=origin, fill=True)
 

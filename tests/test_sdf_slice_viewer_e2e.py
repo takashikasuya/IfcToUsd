@@ -208,3 +208,70 @@ def test_moving_sdf_slice_height_slider_changes_overlay_z(page, served_url_with_
     z_after = page.evaluate("window.ifc2usdViewer.getSdfSliceMesh().position.z")
 
     assert z_before != z_after
+
+
+def test_slice_texture_preserves_row_order_from_source_grid(page, served_url_with_sdf):
+    """回帰テスト（コードレビューで発見）: _buildSdfSliceTextureが作るCanvasTextureは
+    既定でflipY=trueだが、PlaneGeometryのUV生成は local +Y (= 高い world Y = iy_max側)
+    にv=1を割り当てる。flipYを明示的にfalseにしないと、v=1(高いY)がcanvas row 0
+    (= values[0] = iy_min側の値)をサンプルしてしまい、スライス全体が上下反転して
+    表示される（Y非対称な要素で内部/外部が逆側に描画される）。
+
+    ここでは実データのGUIDに対し、Y方向に非対称な2行グリッド（row0=内部、row1=外部）を
+    fetchのレスポンスとして差し替え、(1) texture.flipYがfalseであること、
+    (2) canvasの実ピクセルがvalues[row]の順序どおりに書き込まれていること、
+    の両方を確認する。両方が揃って初めて「values[0]がworld上の低いY側に、
+    values[rows-1]が高いY側に表示される」という正しい対応が保証される。"""
+    _wait_for_load(page, served_url_with_sdf)
+    guid = _first_guid(page)
+    synthetic_sdf = {
+        "version": 1,
+        "size": 0.5,
+        "elements": {
+            guid: {
+                "cols": 2,
+                "rows": 2,
+                "originX": 0.0,
+                "originY": 0.0,
+                "size": 0.5,
+                "slices": [
+                    {"z": 1.0, "values": [[-5.0, -5.0], [5.0, 5.0]]},
+                ],
+            }
+        },
+    }
+
+    def _serve_synthetic_sdf(route):
+        import json as json_module
+
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json_module.dumps(synthetic_sdf),
+        )
+
+    # sdf.jsonの内容はguid判明後にしか組み立てられないため、まず通常ロードでguidを
+    # 取得し、routeを登録してからreload()でsdf.jsonの再取得をこの合成データへ差し替える。
+    page.route("**/*_sdf.json", _serve_synthetic_sdf)
+    page.reload()
+    page.wait_for_function("window.ifc2usdLoaded === true", timeout=10000)
+
+    page.evaluate("(guid) => window.ifc2usdViewer.selectByGuid(guid)", guid)
+    page.locator("#sdf-slice-toggle").check()
+    page.wait_for_timeout(100)
+
+    flip_y = page.evaluate("window.ifc2usdViewer.getSdfSliceMesh().material.map.flipY")
+    assert flip_y is False
+
+    row_colors = page.evaluate("""
+        () => {
+            const canvas = window.ifc2usdViewer.getSdfSliceMesh().material.map.image;
+            const ctx = canvas.getContext('2d');
+            const row0 = ctx.getImageData(0, 0, 1, 1).data;
+            const row1 = ctx.getImageData(0, 1, 1, 1).data;
+            return { row0: Array.from(row0), row1: Array.from(row1) };
+        }
+    """)
+    # values[0] = -5.0 (内部) -> 青系, values[1] = +5.0 (外部) -> 橙系
+    assert row_colors["row0"][2] > row_colors["row0"][0]  # row0: blue > red
+    assert row_colors["row1"][0] > row_colors["row1"][2]  # row1: red > blue

@@ -113,3 +113,18 @@ def test_origin_matches_element_bbox_not_scene_origin():
 
     assert entry["originX"] == pytest.approx(9.5, abs=1e-6)
     assert entry["originY"] == pytest.approx(19.5, abs=1e-6)
+
+
+def test_tall_thin_element_exceeding_surface_voxel_cap_is_skipped():
+    """コードレビューで発見: cols*rowsのグリッドセル数上限だけでは、断面が小さく
+    細長い（Z方向に長い）要素のコストを抑えられない。build_narrow_band_sdf内部の
+    総当たり距離計算コストは表面ボクセル数（3次元、Z方向にいくら伸びても
+    cols*rowsには現れない）に支配されるため、別途表面ボクセル数自体に上限を設けて
+    いる。この柱状要素はcols*rows=9(3x3)でグリッドセル数上限は余裕で通過するが、
+    表面ボクセル数は側面だけで数千に達し_MAX_SURFACE_VOXELSを超えるはず。"""
+    el = _box_element("column", [0.3, 0.3, 60.0], [0.15, 0.15, 30.0])
+    size = 0.1
+
+    result = build_sdf_slices_json([el], size=size, slice_count=3)
+
+    assert "column" not in result["elements"]

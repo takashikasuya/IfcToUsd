@@ -288,6 +288,12 @@ function _buildSdfSliceTexture(entry, sliceIndex) {
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
+  // Texture defaults to flipY=true (canvas row 0 -> texture v=1), but PlaneGeometry
+  // also puts v=1 at its local +Y (high world Y / iy_max) edge. Combined, that would
+  // sample canvas row 0 (values[0], i.e. iy_min) at the iy_max edge - a vertical
+  // mirror of the data. flipY=false makes canvas row 0 map to v=0 (iy_min edge, the
+  // low-Y side), matching how values[row] was built (row 0 = iy_min).
+  texture.flipY = false;
   return texture;
 }
 
