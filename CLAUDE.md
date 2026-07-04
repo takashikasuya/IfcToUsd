@@ -61,6 +61,14 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
 - Material names are sanitized for USD prim paths via `sanitize_material_name()` (hyphen→`_`,
   other punctuation dropped).
 
+## Planned work
+
+`docs/viewer/` holds the research, architecture, spec, and backlog for a USD + voxel viewer
+(Hydra-inspired: author PointInstancer/variant/purpose USD layers for external Hydra viewers,
+plus a self-contained three.js web viewer served by a future `ifc2usd serve`). Consult it
+before implementing viewer-related features; the voxel JSON v2 schema and CLI subcommand
+layout are specified there.
+
 ## Out of scope
 
 `IFC_to_GLTF.ipynb`, `IFC_to_RDF.ipynb`, `GLTF_to_Voxel.ipynb` are separate notebook pipelines
