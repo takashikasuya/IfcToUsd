@@ -94,6 +94,20 @@ def test_voxelize_rejects_unsupported_extension(tmp_path):
         main(["voxelize", str(bogus)])
 
 
+def test_voxelize_rejects_stage_with_no_elements(tmp_path):
+    """要素（GUID+class customData付きmesh）が1つもないUSDでは、
+    生のValueErrorではなく通常のCLIエラー（SystemExit）になる。"""
+    from pxr import Usd, UsdGeom
+
+    empty_usda = tmp_path / "empty.usda"
+    stage = Usd.Stage.CreateNew(str(empty_usda))
+    UsdGeom.Xform.Define(stage, "/Empty")
+    stage.GetRootLayer().Save()
+
+    with pytest.raises(SystemExit):
+        main(["voxelize", str(empty_usda)])
+
+
 def test_voxelize_source_metadata_records_input_filename(tmp_path):
     usda = tmp_path / "minimal.usda"
     convert(FIXTURE, usda)

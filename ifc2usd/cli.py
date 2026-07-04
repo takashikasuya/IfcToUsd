@@ -69,11 +69,18 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
 
 
-def _run_convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+def _configure_logging(verbose: bool) -> None:
+    # force=True: 同一プロセス内で複数のサブコマンドが呼ばれても
+    # （テストスイートなど）毎回のverbose設定を確実に反映させる。
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
+        force=True,
     )
+
+
+def _run_convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _configure_logging(args.verbose)
     if not args.ifc_path.is_file():
         parser.error(f"IFC file not found: {args.ifc_path}")
 
@@ -105,10 +112,7 @@ def _add_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    _configure_logging(args.verbose)
     if not args.input_path.is_file():
         parser.error(f"input file not found: {args.input_path}")
 
@@ -128,6 +132,9 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         source_name = tmp_usda.name
     else:
         parser.error(f"unsupported input file type: {suffix or args.input_path}")
+
+    if not elements:
+        parser.error(f"no voxelizable elements found in: {args.input_path}")
 
     result = build_voxel_json(
         elements,
