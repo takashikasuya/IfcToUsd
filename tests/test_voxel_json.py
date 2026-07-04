@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import pytest
 from pxr import Usd, UsdGeom
 
-from ifc2usd.voxel import VoxelElement, build_voxel_json, morton_decode
+from ifc2usd.voxel import VoxelElement, build_voxel_json, morton_decode, scene_origin
 from tests.conftest import mesh_diffuse_color, wall_mesh_path, world_mesh
 
 WALL_DIMS = {
@@ -117,6 +118,38 @@ def test_color_is_plain_rgb_not_morton_encoded(stage):
     assert tuple(round(c, 3) for c in north["color"]) == (0.8, 0.2, 0.2)
     east = by_name["Wall East"]
     assert tuple(round(c, 3) for c in east["color"]) == (0.2, 0.5, 0.8)
+
+
+def test_scene_origin_rejects_non_finite_vertices(stage):
+    """1要素のNaN頂点が他の正常な要素のoriginまで汚染しないことを保証する。"""
+    elements = _elements(stage)
+    bad_vertices = [(float("nan"), 0.0, 0.0)] + list(elements[0].vertices[1:])
+    poisoned = elements[0]._replace(vertices=bad_vertices)
+
+    with pytest.raises(ValueError):
+        scene_origin([poisoned, elements[1]])
+
+
+def test_element_with_zero_voxels_is_kept_with_empty_indices(stage, monkeypatch):
+    """あるLODで占有ボクセルが0個になっても、要素自体をindices=[]で残す
+    （他のLODには出現するのに黙って消えると、ビューワー側で「このLODに
+    存在しない」のか「存在するが空」なのか区別できなくなるため）。"""
+    import ifc2usd.voxel as voxel_module
+
+    elements = _elements(stage)
+    real_voxelize_mesh = voxel_module.voxelize_mesh
+
+    def fake_voxelize_mesh(vertices, indices, size, origin=None, fill=False):
+        used_origin, voxels = real_voxelize_mesh(vertices, indices, size, origin=origin, fill=fill)
+        return used_origin, set()  # 常に0ボクセルを返す
+
+    monkeypatch.setattr(voxel_module, "voxelize_mesh", fake_voxelize_mesh)
+
+    result = build_voxel_json(elements, sizes=[0.5])
+    guids = {el["guid"] for el in result["lods"][0]["elements"]}
+    assert guids == {e.guid for e in elements}
+    for el in result["lods"][0]["elements"]:
+        assert el["indices"] == []
 
 
 def test_multiple_lods_have_independent_voxel_counts(stage):

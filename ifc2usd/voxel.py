@@ -221,9 +221,16 @@ def voxelize_mesh(
 
 def scene_origin(elements: Sequence[VoxelElement]) -> tuple[float, float, float]:
     """複数要素のワールド座標頂点から、共有originとなるシーン全体のAABB最小点を求める。"""
-    mins = [
-        np.asarray(el.vertices, dtype=np.float64).min(axis=0) for el in elements if len(el.vertices)
-    ]
+    mins = []
+    for el in elements:
+        if not len(el.vertices):
+            continue
+        verts = np.asarray(el.vertices, dtype=np.float64)
+        if not np.all(np.isfinite(verts)):
+            # NaN/Inf は np.min に伝播し、他の正常な要素の origin まで汚染するため
+            # ここで検出する（voxelize_mesh 自身の検証は要素ごとで、原点計算より後）。
+            raise ValueError(f"element {el.guid!r} has non-finite vertices")
+        mins.append(verts.min(axis=0))
     if not mins:
         raise ValueError("scene_origin requires at least one element with vertices")
     return tuple(np.min(mins, axis=0).tolist())
@@ -240,7 +247,10 @@ def build_voxel_json(
 
     全要素・全LODで共有する単一の `origin`（シーン全体のワールドAABB最小点）を
     用いるため、`origin + index*size` はどの要素・どのLODでも同じワールド座標系
-    に一致する。頂点を持たない要素は静かにスキップする。
+    に一致する。頂点を持たない要素は出力から除外する。ボクセル化した結果
+    占有ボクセルが0個になった要素は、`indices: []` として出力する（他のLODには
+    出現するのにこのLODでは要素自体が消えてしまうと、ビューワー側で「このLODに
+    存在しない」のか「存在するが空」なのか区別できなくなるため）。
     """
     origin = scene_origin(elements)
 
@@ -251,8 +261,6 @@ def build_voxel_json(
             if not len(el.vertices):
                 continue
             _, voxels = voxelize_mesh(el.vertices, el.indices, size, origin=origin, fill=fill)
-            if not voxels:
-                continue
             indices = sorted(morton_encode(*v) for v in voxels)
             lod_elements.append(
                 {
