@@ -72,6 +72,32 @@ def test_build_serve_directory_voxel_sizes_are_configurable(usda, tmp_path):
     assert [lod["size"] for lod in voxels["lods"]] == [0.5, 0.25]
 
 
+def test_build_serve_directory_omits_sdf_asset_by_default(usda, tmp_path):
+    """E5-3のSDFスライスは追加の要素ごとナローバンドSDF計算コストを伴うため、
+    voxels.jsonと異なり既定では生成しない（明示的な--sdf-slices指定が必要）。"""
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    assert "sdf" not in scene["assets"]
+
+
+def test_build_serve_directory_produces_sdf_slices_when_requested(usda, tmp_path):
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir, sdf_slices=True)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    sdf_name = scene["assets"]["sdf"]
+    sdf_path = workdir / sdf_name
+    assert sdf_path.is_file()
+
+    sdf = json.loads(sdf_path.read_text(encoding="utf-8"))
+    assert sdf["version"] == 1
+    assert len(sdf["elements"]) == 2  # 壁2枚
+
+
 def test_build_serve_directory_omits_voxels_asset_when_no_elements(tmp_path):
     """ボクセル化可能な要素（GUID+class customData付きのmesh）が1つもないUSDでは、
     生のValueErrorで落ちるのではなくvoxels資産自体を省略する

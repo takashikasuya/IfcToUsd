@@ -11,6 +11,8 @@ const treePanel = document.getElementById("tree-panel");
 const propertyPanel = document.getElementById("property-panel");
 const voxelLodSelect = document.getElementById("voxel-lod-select");
 const sectionHeightSlider = document.getElementById("section-height-slider");
+const sdfSliceToggle = document.getElementById("sdf-slice-toggle");
+const sdfSliceHeightSlider = document.getElementById("sdf-slice-height-slider");
 
 const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
@@ -247,6 +249,130 @@ function selectByGuid(guid) {
   }
 
   renderPropertyPanel(guid);
+  setSdfSliceUiForSelection(guid);
+}
+
+// 要素ごとの narrow-band SDF 水平スライス（E5-3、sdf_slice.py が生成する
+// `<stem>_sdf.json`）。既定では生成されない（serve --sdf-slices指定時のみ）ため
+// scene.jsonにassets.sdfが無ければ空のまま。
+const sdfSlicesByGuid = new Map();
+// 選択中要素のスライスをオーバーレイ表示するプレーン。選択/トグル/高さ変更の
+// たびに作り直す（voxels.jsonのInstancedMeshと違い要素選択のたびに解像度・
+// 位置が変わるため、使い回すより毎回張り替える方が単純で扱いやすい）。
+let sdfSliceMesh = null;
+
+function _sdfSliceColorFor(value) {
+  if (value === null || value === undefined) return [0, 0, 0, 0]; // narrow-band外: 透明
+  if (Math.abs(value) < 1e-9) return [255, 255, 255, 230]; // 表面(距離0): 白
+  return value < 0 ? [80, 140, 255, 170] : [255, 120, 80, 130]; // 内部: 青 / 外部: 橙
+}
+
+function _buildSdfSliceTexture(entry, sliceIndex) {
+  const slice = entry.slices[sliceIndex];
+  const canvas = document.createElement("canvas");
+  canvas.width = entry.cols;
+  canvas.height = entry.rows;
+  const ctx = canvas.getContext("2d");
+  const image = ctx.createImageData(entry.cols, entry.rows);
+  for (let row = 0; row < entry.rows; row++) {
+    for (let col = 0; col < entry.cols; col++) {
+      const [r, g, b, a] = _sdfSliceColorFor(slice.values[row][col]);
+      const i = (row * entry.cols + col) * 4;
+      image.data[i] = r;
+      image.data[i + 1] = g;
+      image.data[i + 2] = b;
+      image.data[i + 3] = a;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  return texture;
+}
+
+function clearSdfSliceOverlay() {
+  if (!sdfSliceMesh) return;
+  modelRoot.remove(sdfSliceMesh);
+  sdfSliceMesh.geometry.dispose();
+  sdfSliceMesh.material.map?.dispose();
+  sdfSliceMesh.material.dispose();
+  sdfSliceMesh = null;
+}
+
+// PlaneGeometryは既定でXY平面(法線+Z)に置かれる。sdf_slice.pyのorigin/z値は
+// IFCのZ-UPワールド座標そのもの(voxelRootの各インスタンスと同じ規約)なので、
+// modelRootの子として追加すれば、他の描画物と同じZ-UP→Y-UP回転を受けて
+// 正しい向き・高さで表示される(平面自体を回転させる必要は無い)。
+function updateSdfSliceOverlay() {
+  clearSdfSliceOverlay();
+  if (!sdfSliceToggle.checked || selectedGuid === null) return;
+
+  const entry = sdfSlicesByGuid.get(selectedGuid);
+  if (!entry) return;
+
+  const sliceIndex = Number(sdfSliceHeightSlider.value);
+  const slice = entry.slices[sliceIndex];
+  if (!slice) return;
+
+  const texture = _buildSdfSliceTexture(entry, sliceIndex);
+  const geometry = new THREE.PlaneGeometry(entry.cols * entry.size, entry.rows * entry.size);
+  // depthTest:false: このスライスは選択中要素自身の内部を切った断面なので、
+  // 通常の深度テストのままだと要素自身の不透明メッシュ/ボクセルに埋もれて
+  // 常に隠れてしまう（診断目的のオーバーレイなので、他ジオメトリより手前に
+  // 常時見える方が実用上正しい）。
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = 999;
+  mesh.position.set(
+    entry.originX + (entry.cols * entry.size) / 2,
+    entry.originY + (entry.rows * entry.size) / 2,
+    slice.z,
+  );
+  modelRoot.add(mesh);
+  sdfSliceMesh = mesh;
+}
+
+function setSdfSliceUiForSelection(guid) {
+  const entry = guid !== null ? sdfSlicesByGuid.get(guid) : undefined;
+  if (!entry) {
+    sdfSliceToggle.checked = false;
+    sdfSliceToggle.disabled = true;
+    sdfSliceHeightSlider.disabled = true;
+    sdfSliceHeightSlider.min = "0";
+    sdfSliceHeightSlider.max = "0";
+    sdfSliceHeightSlider.value = "0";
+    clearSdfSliceOverlay();
+    return;
+  }
+  sdfSliceToggle.disabled = false;
+  sdfSliceHeightSlider.disabled = false;
+  sdfSliceHeightSlider.min = "0";
+  sdfSliceHeightSlider.max = String(entry.slices.length - 1);
+  sdfSliceHeightSlider.step = "1";
+  sdfSliceHeightSlider.value = String(Math.floor(entry.slices.length / 2));
+  updateSdfSliceOverlay();
+}
+
+sdfSliceToggle.addEventListener("change", updateSdfSliceOverlay);
+sdfSliceHeightSlider.addEventListener("input", updateSdfSliceOverlay);
+
+async function loadSdfSlices(sdfUrl) {
+  const response = await fetch(sdfUrl);
+  if (!response.ok) {
+    throw new Error(`failed to load sdf slices: ${response.status}`);
+  }
+  const data = await response.json();
+  sdfSlicesByGuid.clear();
+  for (const [guid, entry] of Object.entries(data.elements)) {
+    sdfSlicesByGuid.set(guid, entry);
+  }
 }
 
 // voxels.json のLODごとに1つの THREE.InstancedMesh を割り当てる（1 draw call/LOD、
@@ -565,6 +691,15 @@ async function loadScene() {
     }
   }
 
+  if (sceneDescription.assets.sdf) {
+    // sdfもボクセル同様、無ければメッシュ表示自体には影響しない付加情報。
+    try {
+      await loadSdfSlices(sceneDescription.assets.sdf);
+    } catch (error) {
+      console.warn("ifc2usd viewer: failed to load SDF slices, continuing without them", error);
+    }
+  }
+
   return sceneDescription;
 }
 
@@ -597,6 +732,8 @@ window.ifc2usdViewer = {
   currentRaycastTargets,
   getSectionClipHeight: () => sectionClipPlane.constant,
   setSectionClipHeight,
+  hasSdfSlicesFor: (guid) => sdfSlicesByGuid.has(guid),
+  getSdfSliceMesh: () => sdfSliceMesh,
 };
 
 resize();

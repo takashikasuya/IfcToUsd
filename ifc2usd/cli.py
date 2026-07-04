@@ -207,6 +207,10 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-open", action="store_true", help="Do not open a browser automatically"
     )
+    parser.add_argument(
+        "--sdf-slices", action="store_true",
+        help="Also compute per-element narrow-band SDF horizontal slices (E5-3) for viewer overlay",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
 
 
@@ -217,7 +221,7 @@ def _run_serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
 
     with tempfile.TemporaryDirectory(prefix="ifc2usd_serve_") as tmpdir:
         workdir = Path(tmpdir)
-        build_serve_directory(args.usd_path, workdir)
+        build_serve_directory(args.usd_path, workdir, sdf_slices=args.sdf_slices)
 
         try:
             server = make_server(workdir, port=args.port)

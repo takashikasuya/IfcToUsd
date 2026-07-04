@@ -20,6 +20,7 @@ from pxr import Usd, UsdGeom
 from . import __version__
 from .gltf import export_gltf
 from .scene_index import build_scene_json
+from .sdf_slice import build_sdf_slices_json
 from .usd import elements_from_stage
 from .voxel import build_voxel_json
 
@@ -27,6 +28,7 @@ logger = logging.getLogger("ifc2usd")
 
 _VIEWER_ASSETS_DIR = Path(__file__).parent / "viewer"
 _DEFAULT_VOXEL_SIZES: tuple[float, ...] = (0.5,)
+_DEFAULT_SDF_SLICE_SIZE = 0.5
 
 
 def _copy_viewer_assets(dest: Path) -> None:
@@ -39,7 +41,10 @@ def _copy_viewer_assets(dest: Path) -> None:
 
 
 def build_serve_directory(
-    usd_path: Path, workdir: Path, voxel_sizes: Sequence[float] = _DEFAULT_VOXEL_SIZES
+    usd_path: Path,
+    workdir: Path,
+    voxel_sizes: Sequence[float] = _DEFAULT_VOXEL_SIZES,
+    sdf_slices: bool = False,
 ) -> Path:
     """USD から scene.json/GLB/voxels.json を生成し、静的ビューワーアセットと共に
     `workdir` へ配置する。`workdir` は既存の空ディレクトリを想定する。
@@ -48,6 +53,11 @@ def build_serve_directory(
     参照）が1つもない場合は voxels.json 自体を生成せず、`scene.json` の
     `assets` に `voxels` キーを含めない（GLB のみのメッシュ表示は成立するため、
     ここで打ち切る必要はない）。
+
+    `sdf_slices=True` の場合、要素ごとのSDF水平スライス（E5-3、`sdf_slice.py`）を
+    追加で計算し `<stem>_sdf.json` を生成する。voxels.json と異なり既定で無効：
+    narrow-band SDF構築は要素ごとに追加の占有ボクセル化2回（表面/内部）を要し、
+    通常の変換・閲覧フローには不要なコストのため、明示的に要求されたときだけ払う。
 
     Raises:
         FileNotFoundError: `usd_path` が存在しない場合。CLI(`serve`)は事前に
@@ -80,6 +90,12 @@ def build_serve_directory(
         )
         (workdir / voxels_name).write_text(json.dumps(voxels, ensure_ascii=False), encoding="utf-8")
         assets["voxels"] = voxels_name
+
+    if sdf_slices and any(len(el.vertices) for el in elements):
+        sdf_name = f"{usd_path.stem}_sdf.json"
+        sdf = build_sdf_slices_json(elements, size=_DEFAULT_SDF_SLICE_SIZE)
+        (workdir / sdf_name).write_text(json.dumps(sdf, ensure_ascii=False), encoding="utf-8")
+        assets["sdf"] = sdf_name
 
     scene = build_scene_json(stage, assets=assets)
     (workdir / "scene.json").write_text(json.dumps(scene, ensure_ascii=False), encoding="utf-8")
