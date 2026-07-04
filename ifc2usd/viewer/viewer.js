@@ -370,6 +370,37 @@ function findGuidOfObject(object) {
   return null;
 }
 
+function findGuidOfVoxelInstance(mesh, instanceId) {
+  for (const lod of voxelLods) {
+    // findGuidOfObject と挙動を揃えるため null で統一する（undefined を返すと
+    // 呼び出し側の `guid !== null` ガードを素通りしてしまい、selectByGuid が
+    // undefined で呼ばれて既存の選択状態を壊しかねない）。
+    if (lod.mesh === mesh) return lod.instanceGuids[instanceId] ?? null;
+  }
+  return null;
+}
+
+// 表示モードに応じたクリック選択レイキャストの対象を返す。
+//
+// object.visible をレイキャスト対象の絞り込みに使わない: three.jsの
+// Raycaster は祖先の visible を辿らず、各ノード自身の visible だけを見て
+// 判定する（Groupのvisible=falseは描画上は子を隠すが、レイキャストには
+// 影響しない）。glbRoot(GLTFLoaderのルートGroup)のvisibleだけをfalseに
+// してもその子メッシュ自身はvisible=trueのままなので、voxelモードで
+// メッシュが「見えないのにクリックだけは反応する」事故になる。
+// そのためdisplayMode/activeVoxelLodIndexから対象リストを明示的に組み立てる。
+function currentRaycastTargets() {
+  const targets = [];
+  if (glbRoot && (displayMode === "mesh" || displayMode === "both")) {
+    targets.push(glbRoot);
+  }
+  if (displayMode === "voxel" || displayMode === "both") {
+    const activeLod = voxelLods[activeVoxelLodIndex];
+    if (activeLod) targets.push(activeLod.mesh);
+  }
+  return targets;
+}
+
 const raycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
 let pointerDownPosition = null;
@@ -403,13 +434,13 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(pointerNdc, camera);
-  // メッシュ(glTFロード分)のみを対象にする。voxelRootをここに含めると、
-  // 既定で可視のボクセルInstancedMeshが手前に交差してメッシュ選択を妨げてしまう
-  // （ボクセルクリックからのGUID逆引きはIssue #16で別途扱う）。
-  const intersections = glbRoot ? raycaster.intersectObjects([glbRoot], true) : [];
+  const intersections = raycaster.intersectObjects(currentRaycastTargets(), true);
   if (intersections.length === 0) return;
 
-  const guid = findGuidOfObject(intersections[0].object);
+  const hit = intersections[0];
+  const guid = hit.object.isInstancedMesh
+    ? findGuidOfVoxelInstance(hit.object, hit.instanceId)
+    : findGuidOfObject(hit.object);
   if (guid !== null) selectByGuid(guid);
 });
 
@@ -513,6 +544,7 @@ window.ifc2usdViewer = {
   setDisplayMode,
   getDisplayMode: () => displayMode,
   setActiveVoxelLodIndex,
+  currentRaycastTargets,
 };
 
 resize();
