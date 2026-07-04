@@ -155,3 +155,62 @@ def test_z_up_data_is_reoriented_for_three_js_y_up(page, served_url):
     _wait_for_load(page, served_url)
     rotation_x = page.evaluate("window.ifc2usdViewer.modelRoot.rotation.x")
     assert abs(rotation_x - (-1.5707963267948966)) < 1e-6
+
+
+def test_near_clip_plane_updates_when_zooming_in_close(page, served_url):
+    """フィット後に大きくズームインしても、near平面がジオメトリを
+    突き抜けたままにならない（毎フレームの再計算を検証する）。"""
+    _wait_for_load(page, served_url)
+
+    canvas_box = page.eval_on_selector(
+        "#viewport canvas",
+        "el => { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y, w: r.width, h: r.height}; }",
+    )
+    page.mouse.move(canvas_box["x"] + canvas_box["w"] / 2, canvas_box["y"] + canvas_box["h"] / 2)
+    for _ in range(20):
+        page.mouse.wheel(0, -400)
+    page.wait_for_timeout(300)
+
+    near, distance = page.evaluate("""
+        () => {
+            const c = window.ifc2usdViewer.camera;
+            const t = window.ifc2usdViewer.controls.target;
+            const distance = c.position.distanceTo(t);
+            return [c.near, distance];
+        }
+    """)
+    # near平面はカメラ-ターゲット距離より十分小さく保たれている
+    assert near < distance
+
+
+def test_scene_load_failure_shows_visible_error_banner(browser, tmp_path):
+    """scene.jsonの取得に失敗した場合、コンソールだけでなく画面上にも
+    エラーが表示される。"""
+    import shutil
+
+    from ifc2usd.serve import make_server
+
+    empty_dir = tmp_path / "empty_www"
+    empty_dir.mkdir()
+    viewer_src = Path(__file__).parent.parent / "ifc2usd" / "viewer"
+    shutil.copy2(viewer_src / "index.html", empty_dir / "index.html")
+    shutil.copy2(viewer_src / "viewer.js", empty_dir / "viewer.js")
+    shutil.copytree(viewer_src / "vendor", empty_dir / "vendor")
+    # scene.json をわざと配置しない
+
+    server = make_server(empty_dir, port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        page = browser.new_page(viewport={"width": 800, "height": 600})
+        page.goto(f"http://127.0.0.1:{port}/")
+        page.wait_for_function("window.ifc2usdLoadError !== undefined", timeout=10000)
+        banner_text = page.evaluate(
+            "document.getElementById('load-error-banner')?.textContent"
+        )
+        assert banner_text and "失敗" in banner_text
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)

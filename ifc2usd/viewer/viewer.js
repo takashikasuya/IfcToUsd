@@ -43,7 +43,10 @@ function resize() {
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
 }
-window.addEventListener("resize", resize);
+// window の resize イベントだけでは、将来ツリー/プロパティパネル(E3-4/E3-5)の
+// 開閉で #viewport 自体のサイズが変わってもウィンドウ自体は変化しないため
+// 検知できない。ResizeObserver で要素自体のサイズ変化を直接監視する。
+new ResizeObserver(resize).observe(viewport);
 
 /**
  * カメラを box が画面に収まる位置へ移動する（全体フィット/選択フィットの
@@ -66,9 +69,7 @@ function fitCameraToBox(box, { paddingFactor = 1.2 } = {}) {
 
   controls.target.copy(center);
   camera.position.copy(center).addScaledVector(direction, fitDistance);
-  camera.near = Math.max(fitDistance / 100, 0.01);
-  camera.far = fitDistance * 100;
-  camera.updateProjectionMatrix();
+  updateClipPlanes();
   controls.update();
 }
 
@@ -76,6 +77,20 @@ let modelBoundingBox = new THREE.Box3();
 
 function fitAll() {
   fitCameraToBox(modelBoundingBox);
+}
+
+/**
+ * 現在のカメラ-ターゲット距離に応じてnear/farを更新する。fitCameraToBoxは
+ * フィット時点の距離でnear/farを設定するだけなので、そのあとホイールで
+ * ズームインするとnearを突き抜けてジオメトリが欠けて見える問題が起きる。
+ * 毎フレーム呼ぶことで、自由なズーム操作でも近接クリップを避ける。
+ */
+function updateClipPlanes() {
+  const distance = camera.position.distanceTo(controls.target);
+  if (distance < 1e-6) return;
+  camera.near = Math.max(distance / 100, 0.001);
+  camera.far = Math.max(distance * 100, camera.near * 10);
+  camera.updateProjectionMatrix();
 }
 
 async function loadScene() {
@@ -100,6 +115,7 @@ async function loadScene() {
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  updateClipPlanes();
   renderer.render(scene, camera);
 }
 
@@ -126,4 +142,12 @@ loadScene()
   .catch((error) => {
     console.error("ifc2usd viewer: failed to load scene", error);
     window.ifc2usdLoadError = String(error);
+
+    const banner = document.createElement("div");
+    banner.id = "load-error-banner";
+    banner.style.cssText =
+      "position:absolute;top:0;left:0;right:0;padding:12px;" +
+      "background:#5a1e1e;color:#fff;font-family:sans-serif;z-index:10;";
+    banner.textContent = `モデルの読み込みに失敗しました: ${error}`;
+    viewport.appendChild(banner);
   });
