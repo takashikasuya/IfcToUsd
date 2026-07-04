@@ -36,7 +36,17 @@ def _copy_viewer_assets(dest: Path) -> None:
 def build_serve_directory(usd_path: Path, workdir: Path) -> Path:
     """USD から scene.json/GLB を生成し、静的ビューワーアセットと共に
     `workdir` へ配置する。`workdir` は既存の空ディレクトリを想定する。
+
+    Raises:
+        FileNotFoundError: `usd_path` が存在しない場合。CLI(`serve`)は事前に
+            チェックして分かりやすいエラーにしているが、この関数を直接呼ぶ
+            他の呼び出し元のために、生の Usd.Stage.Open 由来の pxr.Tf.ErrorException
+            より分かりやすい例外にする。
     """
+    usd_path = Path(usd_path)
+    if not usd_path.is_file():
+        raise FileNotFoundError(f"USD file not found: {usd_path}")
+
     stage = Usd.Stage.Open(str(usd_path))
 
     glb_name = f"{Path(usd_path).stem}.glb"

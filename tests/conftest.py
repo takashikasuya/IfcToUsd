@@ -16,6 +16,23 @@ from ifc2usd import convert
 
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal.ifc"
 
+# このサンドボックス環境ではpip配布のplaywrightパッケージが期待するブラウザリビジョンと
+# 事前インストール済みのChromiumが一致しないため、固定パスの起動が必要
+# （`playwright install`はこの環境のポリシー上実行できない）。他の環境/CIでは
+# このパスが存在しないことがあるため、存在する場合のみ指定し、なければ
+# Playwright標準のバンドル済みブラウザにフォールバックする。
+_PINNED_CHROMIUM_PATH = Path("/opt/pw-browsers/chromium")
+
+CHROMIUM_LAUNCH_ARGS = ["--use-gl=swiftshader", "--enable-webgl", "--ignore-gpu-blocklist"]
+
+
+def chromium_launch_kwargs() -> dict:
+    """Playwrightの`browser_type.launch()`へ渡すkwargsを返す。"""
+    kwargs: dict = {"args": CHROMIUM_LAUNCH_ARGS}
+    if _PINNED_CHROMIUM_PATH.is_file():
+        kwargs["executable_path"] = str(_PINNED_CHROMIUM_PATH)
+    return kwargs
+
 
 @pytest.fixture(scope="module")
 def stage(tmp_path_factory) -> Usd.Stage:

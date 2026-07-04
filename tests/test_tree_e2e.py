@@ -10,11 +10,9 @@ from playwright.sync_api import sync_playwright
 
 from ifc2usd import convert
 from ifc2usd.serve import build_serve_directory, make_server
+from tests.conftest import chromium_launch_kwargs
 
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal.ifc"
-
-_CHROMIUM_PATH = "/opt/pw-browsers/chromium"
-_LAUNCH_ARGS = ["--use-gl=swiftshader", "--enable-webgl", "--ignore-gpu-blocklist"]
 
 
 @pytest.fixture(scope="module")
@@ -41,7 +39,7 @@ def served_url(tmp_path_factory):
 @pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as p:
-        b = p.chromium.launch(executable_path=_CHROMIUM_PATH, args=_LAUNCH_ARGS)
+        b = p.chromium.launch(**chromium_launch_kwargs())
         yield b
         b.close()
 

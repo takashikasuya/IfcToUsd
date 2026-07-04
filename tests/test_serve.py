@@ -55,9 +55,10 @@ def test_build_serve_directory_copies_viewer_assets(usda, tmp_path):
 
 
 def test_build_serve_directory_rejects_missing_usd(tmp_path):
+    """存在しないパスは、pxr由来の分かりにくい例外ではなく明確なFileNotFoundErrorになる。"""
     workdir = tmp_path / "www"
     workdir.mkdir()
-    with pytest.raises(Exception):
+    with pytest.raises(FileNotFoundError):
         build_serve_directory(tmp_path / "does_not_exist.usda", workdir)
 
 

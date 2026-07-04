@@ -109,6 +109,13 @@ def test_indices_are_sorted(stage):
             assert len(el["indices"]) == len(set(el["indices"]))  # 重複なし
 
 
+def test_duplicate_sizes_produce_single_lod(stage):
+    elements = _elements(stage)
+    result = build_voxel_json(elements, sizes=[0.5, 0.5, 0.25, 0.5])
+
+    assert [lod["size"] for lod in result["lods"]] == [0.5, 0.25]
+
+
 def test_color_is_plain_rgb_not_morton_encoded(stage):
     elements = _elements(stage)
     result = build_voxel_json(elements, sizes=[0.5])

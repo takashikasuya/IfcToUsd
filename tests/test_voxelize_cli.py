@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pxr import Usd
 
 from ifc2usd import convert
 from ifc2usd.cli import main
@@ -29,6 +30,49 @@ def test_voxelize_from_usda(tmp_path):
     assert data["lods"][0]["size"] == 0.5
     guids = {el["guid"] for el in data["lods"][0]["elements"]}
     assert len(guids) == 2  # 壁2枚
+
+
+def test_voxelize_also_writes_pointinstancer_usda(tmp_path):
+    """docs/viewer/spec.md §1.1: voxelizeは<base>.jsonに加え<base>.usda
+    （PointInstancerレイヤー、§3）も出力する。"""
+    from pxr import UsdGeom
+
+    usda = tmp_path / "minimal.usda"
+    convert(FIXTURE, usda)
+
+    out_base = tmp_path / "voxels"
+    exit_code = main(["voxelize", str(usda), "--size", "0.5", "--size", "0.25", "-o", str(out_base)])
+    assert exit_code == 0
+
+    voxel_usda_path = out_base.with_suffix(".usda")
+    assert voxel_usda_path.is_file()
+
+    stage = Usd.Stage.Open(str(voxel_usda_path))
+    # referenceが解決され、正本(minimal.usda)の階層が見える。
+    assert stage.GetPrimAtPath("/IFC_Model/Site").IsValid()
+
+    instancer = UsdGeom.PointInstancer(stage.GetPrimAtPath("/IFC_Model/Voxels"))
+    assert instancer.GetPrim().IsValid()
+    variant_set = instancer.GetPrim().GetVariantSets().GetVariantSet("voxelLOD")
+    assert set(variant_set.GetVariantNames()) == {"size_0_5", "size_0_25"}
+
+
+def test_voxelize_from_ifc_directly_also_writes_pointinstancer_usda(tmp_path):
+    """IFC直接入力でも、変換した正本USDへのreferenceを持つ.usdaが書ける
+    （正本を一時ディレクトリに置くとreferenceが壊れるため、永続化して確認する）。"""
+    from pxr import UsdGeom
+
+    out_base = tmp_path / "voxels"
+    exit_code = main(["voxelize", str(FIXTURE), "-o", str(out_base)])
+    assert exit_code == 0
+
+    voxel_usda_path = out_base.with_suffix(".usda")
+    assert voxel_usda_path.is_file()
+
+    stage = Usd.Stage.Open(str(voxel_usda_path))
+    assert stage.GetPrimAtPath("/IFC_Model/Site").IsValid()
+    instancer = UsdGeom.PointInstancer(stage.GetPrimAtPath("/IFC_Model/Voxels"))
+    assert instancer.GetPrim().IsValid()
 
 
 def test_voxelize_multiple_sizes(tmp_path):

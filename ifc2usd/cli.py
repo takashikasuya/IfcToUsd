@@ -1,12 +1,15 @@
 """IFC → USD 変換の CLI エントリポイント。
 
-サブコマンド構成: ``convert``（他のサブコマンドは今後追加予定）。
+サブコマンド構成: ``convert`` / ``voxelize`` / ``export-gltf`` / ``serve``。
 後方互換のため、サブコマンド名を省略した旧来の呼び出し
 (``ifc2usd <ifc> ...``) は ``convert`` として扱う。
 
 例:
     uv run ifc2usd files/ToyodaLab.ifc
     uv run ifc2usd convert files/ToyodaLab.ifc -o output/model.usda --y-up --verbose
+    uv run ifc2usd voxelize output/model.usda --size 0.5
+    uv run ifc2usd export-gltf output/model.usda
+    uv run ifc2usd serve output/model.usda
 """
 
 from __future__ import annotations
@@ -14,13 +17,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import tempfile
 import webbrowser
 from pathlib import Path
 
 import ifcopenshell
-from pxr import Usd
+from pxr import Usd, UsdGeom
 from tqdm import tqdm
 
 from . import __version__
@@ -28,7 +32,7 @@ from .gltf import export_gltf
 from .ifc import create_settings, get_geometry
 from .serve import build_serve_directory, make_server
 from .usd import build_stage, elements_from_stage
-from .voxel import build_voxel_json
+from .voxel import build_voxel_json, build_voxel_stage
 
 logger = logging.getLogger("ifc2usd")
 
@@ -122,35 +126,52 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     sizes = args.sizes or [0.5]
     suffix = args.input_path.suffix.lower()
 
+    output_base = args.output or _default_voxel_output(args.input_path)
+    output_base.parent.mkdir(parents=True, exist_ok=True)
+
     if suffix in _USD_EXTENSIONS:
-        stage = Usd.Stage.Open(str(args.input_path))
+        reference_path = args.input_path
+        stage = Usd.Stage.Open(str(reference_path))
         elements = elements_from_stage(stage)
-        source_name = args.input_path.name
     elif suffix == ".ifc":
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_usda = Path(tmpdir) / f"{args.input_path.stem}_structured.usda"
-            convert(args.input_path, tmp_usda)
-            stage = Usd.Stage.Open(str(tmp_usda))
-            elements = elements_from_stage(stage)
-        source_name = tmp_usda.name
+        # PointInstancerレイヤー（.usda）は正本USDへの相対referenceを持つため、
+        # 変換元USDはtempディレクトリではなく出力先の隣に永続化する
+        # （tempに置くとreferenceが壊れたリンクになってしまう）。
+        reference_path = output_base.parent / f"{args.input_path.stem}_structured.usda"
+        convert(args.input_path, reference_path)
+        stage = Usd.Stage.Open(str(reference_path))
+        elements = elements_from_stage(stage)
     else:
         parser.error(f"unsupported input file type: {suffix or args.input_path}")
 
     if not elements:
         parser.error(f"no voxelizable elements found in: {args.input_path}")
 
+    up_axis = str(UsdGeom.GetStageUpAxis(stage))
+    source_name = reference_path.name
+
     result = build_voxel_json(
         elements,
         sizes=sizes,
         source={"usd": source_name, "generator": f"ifc2usd {__version__}"},
+        up_axis=up_axis,
         fill=args.fill,
     )
-
-    output_base = args.output or _default_voxel_output(args.input_path)
-    output_base.parent.mkdir(parents=True, exist_ok=True)
     json_path = output_base.with_suffix(".json")
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
     logger.info("Wrote voxel JSON: %s", json_path)
+
+    usda_path = output_base.with_suffix(".usda")
+    reference_asset_path = os.path.relpath(reference_path, start=usda_path.parent)
+    build_voxel_stage(
+        elements,
+        sizes=sizes,
+        reference_asset_path=reference_asset_path,
+        output_path=str(usda_path),
+        up_axis=up_axis,
+        fill=args.fill,
+    )
+    logger.info("Wrote voxel PointInstancer layer: %s", usda_path)
     return 0
 
 

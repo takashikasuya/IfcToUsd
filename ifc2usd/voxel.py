@@ -255,8 +255,12 @@ def build_voxel_json(
     """
     origin = scene_origin(elements)
 
+    # 重複サイズは同じLODを無駄に再計算し、JSONにも重複エントリを生むだけなので
+    # 順序を保ったまま除去する（build_voxel_stageと同じ扱い）。
+    unique_sizes = list(dict.fromkeys(sizes))
+
     lods = []
-    for size in sizes:
+    for size in unique_sizes:
         lod_elements = []
         for el in elements:
             if not len(el.vertices):
@@ -304,7 +308,7 @@ def build_voxel_stage(
     正本自体は書き換えない。`reference_asset_path` は `output_path` から見た
     相対パスにすること。
 
-    書き出しは `stage.GetRootLayer().Export(...)` を用いる（内部の実装詳細だが
+    書き出しは `stage.GetRootLayer().Save()` を用いる（内部の実装詳細だが
     重要な注意点）。`Usd.Stage.Export()` はステージを「現在選択中のvariantで
     合成された1枚のフラットな結果」として書き出すため、variantSet自体（他の
     variantの内容や `variantSets`/`variants` の合成情報）が失われる。variantを
@@ -326,7 +330,12 @@ def build_voxel_stage(
 
     origin = scene_origin(elements)
 
-    stage = Usd.Stage.CreateInMemory()
+    # In-memoryスタッシュ（CreateInMemory）だと、直後のAddReference()がanon:層の
+    # 識別子を基準に相対パス解決を試みて失敗し、"Could not open asset"警告が
+    # stderrに出る（実害はなく、Export後に正しいディレクトリから開けば解決するが、
+    # 毎回のvoxelize実行でユーザーに紛らわしい警告を見せてしまう）。output_path
+    # を最初からルートレイヤーのアンカーにすることで、参照解決が最初から成立する。
+    stage = Usd.Stage.CreateNew(str(output_path))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y if up_axis == "Y" else UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
 
@@ -391,5 +400,9 @@ def build_voxel_stage(
 
     variant_set.SetVariantSelection(_variant_name(unique_sizes[0]))
 
-    stage.GetRootLayer().Export(str(output_path))
+    # stage.Export()ではなくroot layer(Sdf.Layer)自体をSaveする。
+    # Usd.Stage.Export()は「現在選択中のvariantで合成された1枚のフラットな
+    # 結果」を書き出すためvariantSet自体が失われるが、Sdf.Layer.Save()は
+    # レイヤーの生の記述（variantSet/variants含む）をそのまま書き出す。
+    stage.GetRootLayer().Save()
     return str(output_path)
