@@ -73,3 +73,16 @@ layout are specified there.
 
 `IFC_to_GLTF.ipynb`, `IFC_to_RDF.ipynb`, `GLTF_to_Voxel.ipynb` are separate notebook pipelines
 not covered by the `ifc2usd` package or its dependencies.
+
+## Token and usage discipline
+
+- Prefer concise answers unless detailed reasoning is explicitly requested.
+- Do not scan the whole repository by default.
+- Before reading more than 10 files, list the candidate files and explain why they are needed.
+- Before making broad changes, propose a plan first.
+- Keep tool use focused on the files directly relevant to the task.
+- Do not run tests repeatedly without explaining what changed.
+- For simple edits, use low effort.
+- For normal coding, use medium effort.
+- Use high or xhigh only for difficult debugging, architecture decisions, or multi-file refactors.
+- If the session becomes long, summarize the current state into a worklog file and recommend starting a fresh session.
