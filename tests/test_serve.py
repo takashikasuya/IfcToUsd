@@ -42,6 +42,90 @@ def test_build_serve_directory_produces_scene_json_and_glb(usda, tmp_path):
     assert (workdir / glb_name).is_file()
 
 
+def test_build_serve_directory_produces_voxels_json(usda, tmp_path):
+    """docs/viewer/spec.md §1.2/§4.1: serveはGLB/scene.jsonに加えvoxels.jsonも
+    生成し、scene.jsonのassets.voxelsから参照できるようにする。"""
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    voxels_name = scene["assets"]["voxels"]
+    voxels_path = workdir / voxels_name
+    assert voxels_path.is_file()
+
+    voxels = json.loads(voxels_path.read_text(encoding="utf-8"))
+    assert voxels["version"] == 2
+    assert len(voxels["lods"]) == 1
+    assert voxels["lods"][0]["size"] == 0.5
+    guids = {el["guid"] for el in voxels["lods"][0]["elements"]}
+    assert len(guids) == 2  # 壁2枚
+
+
+def test_build_serve_directory_voxel_sizes_are_configurable(usda, tmp_path):
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir, voxel_sizes=(0.5, 0.25))
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    voxels = json.loads((workdir / scene["assets"]["voxels"]).read_text(encoding="utf-8"))
+    assert [lod["size"] for lod in voxels["lods"]] == [0.5, 0.25]
+
+
+def test_build_serve_directory_omits_voxels_asset_when_no_elements(tmp_path):
+    """ボクセル化可能な要素（GUID+class customData付きのmesh）が1つもないUSDでは、
+    生のValueErrorで落ちるのではなくvoxels資産自体を省略する
+    （GLBのみのビューワー表示は引き続き成立するため）。"""
+    from pxr import Usd, UsdGeom
+
+    no_elements_usda = tmp_path / "no_elements.usda"
+    stage = Usd.Stage.CreateNew(str(no_elements_usda))
+    root = UsdGeom.Xform.Define(stage, "/Model")
+    stage.SetDefaultPrim(root.GetPrim())
+    # customData(GUID/class)を持たないmesh: export_gltfはこれを描画できる
+    # （elements_from_stageの対象外というだけで、GLB自体は空にならない）。
+    mesh = UsdGeom.Mesh.Define(stage, "/Model/mesh")
+    mesh.CreatePointsAttr([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    stage.GetRootLayer().Save()
+
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(no_elements_usda, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    assert "voxels" not in scene["assets"]
+
+
+def test_build_serve_directory_omits_voxels_asset_when_elements_have_no_vertices(tmp_path):
+    """elements_from_stageはGUID+class customDataとmesh子primがあれば要素を返すが、
+    頂点0件の退化メッシュも要素として拾いうる。全要素が頂点0件だと
+    build_voxel_json内部のscene_originがValueErrorで落ちるため、その手前で
+    voxels.json自体を省略できることを確認する（「elementsがあるかどうか」ではなく
+    「頂点を持つ要素があるかどうか」で判定する必要がある回帰テスト）。"""
+    from pxr import Usd, UsdGeom
+
+    no_vertices_usda = tmp_path / "no_vertices.usda"
+    stage = Usd.Stage.CreateNew(str(no_vertices_usda))
+    root = UsdGeom.Xform.Define(stage, "/Model")
+    stage.SetDefaultPrim(root.GetPrim())
+
+    element = UsdGeom.Xform.Define(stage, "/Model/Element")
+    element.GetPrim().SetCustomDataByKey("GUID", "degenerate-guid")
+    element.GetPrim().SetCustomDataByKey("class", "IfcWall")
+    # customData付きのmesh子primはあるが、頂点は1つも無い(退化メッシュ)。
+    UsdGeom.Mesh.Define(stage, "/Model/Element/mesh")
+    stage.GetRootLayer().Save()
+
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(no_vertices_usda, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    assert "voxels" not in scene["assets"]
+
+
 def test_build_serve_directory_copies_viewer_assets(usda, tmp_path):
     workdir = tmp_path / "www"
     workdir.mkdir()

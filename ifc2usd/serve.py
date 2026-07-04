@@ -13,15 +13,20 @@ import json
 import logging
 import shutil
 from pathlib import Path
+from typing import Sequence
 
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
+from . import __version__
 from .gltf import export_gltf
 from .scene_index import build_scene_json
+from .usd import elements_from_stage
+from .voxel import build_voxel_json
 
 logger = logging.getLogger("ifc2usd")
 
 _VIEWER_ASSETS_DIR = Path(__file__).parent / "viewer"
+_DEFAULT_VOXEL_SIZES: tuple[float, ...] = (0.5,)
 
 
 def _copy_viewer_assets(dest: Path) -> None:
@@ -33,9 +38,16 @@ def _copy_viewer_assets(dest: Path) -> None:
             shutil.copy2(item, target)
 
 
-def build_serve_directory(usd_path: Path, workdir: Path) -> Path:
-    """USD から scene.json/GLB を生成し、静的ビューワーアセットと共に
+def build_serve_directory(
+    usd_path: Path, workdir: Path, voxel_sizes: Sequence[float] = _DEFAULT_VOXEL_SIZES
+) -> Path:
+    """USD から scene.json/GLB/voxels.json を生成し、静的ビューワーアセットと共に
     `workdir` へ配置する。`workdir` は既存の空ディレクトリを想定する。
+
+    ボクセル化可能な要素（GUID+class customData 付きの mesh、`elements_from_stage`
+    参照）が1つもない場合は voxels.json 自体を生成せず、`scene.json` の
+    `assets` に `voxels` キーを含めない（GLB のみのメッシュ表示は成立するため、
+    ここで打ち切る必要はない）。
 
     Raises:
         FileNotFoundError: `usd_path` が存在しない場合。CLI(`serve`)は事前に
@@ -49,10 +61,27 @@ def build_serve_directory(usd_path: Path, workdir: Path) -> Path:
 
     stage = Usd.Stage.Open(str(usd_path))
 
-    glb_name = f"{Path(usd_path).stem}.glb"
+    glb_name = f"{usd_path.stem}.glb"
     export_gltf(stage, str(workdir / glb_name))
 
-    scene = build_scene_json(stage, assets={"gltf": glb_name})
+    assets = {"gltf": glb_name}
+    elements = elements_from_stage(stage)
+    # elements_from_stage は customData(GUID/class) と mesh子prim があれば要素を
+    # 返すが、頂点0件の退化メッシュも含みうる。全要素が頂点0件だと
+    # build_voxel_json -> scene_origin が ValueError で落ちてしまうため、
+    # 頂点を持つ要素が1つもなければ voxels.json 自体を省略する。
+    if any(len(el.vertices) for el in elements):
+        voxels_name = f"{usd_path.stem}_voxels.json"
+        voxels = build_voxel_json(
+            elements,
+            sizes=voxel_sizes,
+            source={"usd": usd_path.name, "generator": f"ifc2usd {__version__}"},
+            up_axis=str(UsdGeom.GetStageUpAxis(stage)),
+        )
+        (workdir / voxels_name).write_text(json.dumps(voxels, ensure_ascii=False), encoding="utf-8")
+        assets["voxels"] = voxels_name
+
+    scene = build_scene_json(stage, assets=assets)
     (workdir / "scene.json").write_text(json.dumps(scene, ensure_ascii=False), encoding="utf-8")
 
     _copy_viewer_assets(workdir)
