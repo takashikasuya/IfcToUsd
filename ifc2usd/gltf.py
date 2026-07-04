@@ -13,7 +13,8 @@ import numpy as np
 import trimesh
 from pxr import Usd, UsdGeom, UsdShade
 
-_MESH_CHILD_NAME = "mesh"
+from .usd import MESH_PRIM_NAME
+
 _DEFAULT_COLOR = (0.5, 0.5, 0.5)
 
 
@@ -104,7 +105,7 @@ def _add_node(stage: Usd.Stage, prim: Usd.Prim, parent_node_name: str, scene: tr
     local_matrix = _local_matrix(prim)
     metadata = _node_metadata(prim)
 
-    mesh_prim = stage.GetPrimAtPath(prim.GetPath().AppendChild(_MESH_CHILD_NAME))
+    mesh_prim = stage.GetPrimAtPath(prim.GetPath().AppendChild(MESH_PRIM_NAME))
     if mesh_prim.IsValid():
         tri_mesh = _mesh_to_trimesh(mesh_prim, stage)
         scene.add_geometry(
@@ -121,7 +122,7 @@ def _add_node(stage: Usd.Stage, prim: Usd.Prim, parent_node_name: str, scene: tr
         )
 
     for child in prim.GetChildren():
-        if child.GetName() == _MESH_CHILD_NAME:
+        if child.GetName() == MESH_PRIM_NAME:
             continue
         _add_node(stage, child, node_name, scene)
 

@@ -10,14 +10,15 @@ from typing import Optional
 
 from pxr import Usd, UsdGeom
 
+from .usd import MESH_PRIM_NAME
+
 _SCHEMA_VERSION = 1
-_MESH_CHILD_NAME = "mesh"
 
 
 def _tree_node(prim: Usd.Prim) -> dict:
     cd = dict(prim.GetCustomData())
     children = [
-        _tree_node(child) for child in prim.GetChildren() if child.GetName() != _MESH_CHILD_NAME
+        _tree_node(child) for child in prim.GetChildren() if child.GetName() != MESH_PRIM_NAME
     ]
     return {
         "path": str(prim.GetPath()),
@@ -35,9 +36,17 @@ def build_scene_json(stage: Usd.Stage, assets: Optional[dict] = None) -> dict:
     `tree` の最上位はステージのデフォルトprim自体（例: `/IFC_Model`)ではなく
     その子（例: `/IFC_Model/Site`）から始まる。デフォルトprimは意味情報を
     持たないassemblyコンテナに過ぎないため。
+
+    Raises:
+        ValueError: ステージにデフォルトprimが設定されていない場合
+            （`serve` のように任意のUSDファイルを受け付ける経路で、
+            defaultPrim未設定のファイルを渡された際に生の RuntimeError
+            ではなく分かりやすいエラーにするため）。
     """
     root = stage.GetDefaultPrim()
-    tree = [_tree_node(child) for child in root.GetChildren() if child.GetName() != _MESH_CHILD_NAME]
+    if not root.IsValid():
+        raise ValueError(f"stage has no default prim: {stage.GetRootLayer().identifier}")
+    tree = [_tree_node(child) for child in root.GetChildren() if child.GetName() != MESH_PRIM_NAME]
 
     up_axis = UsdGeom.GetStageUpAxis(stage)
 

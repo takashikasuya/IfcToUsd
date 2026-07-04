@@ -100,6 +100,14 @@ def test_default_assets_is_empty_dict_when_omitted(stage):
     assert result["assets"] == {}
 
 
+def test_rejects_stage_without_default_prim():
+    """defaultPrim未設定のUSDでは、生のRuntimeErrorではなく分かりやすいValueError。"""
+    stage_without_default = Usd.Stage.CreateInMemory()
+
+    with pytest.raises(ValueError):
+        build_scene_json(stage_without_default)
+
+
 def test_up_axis_reflects_stage_metadata(tmp_path):
     usda = tmp_path / "yup.usda"
     convert(FIXTURE, usda, y_up=True)

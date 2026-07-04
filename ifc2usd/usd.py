@@ -16,6 +16,11 @@ from .voxel import VoxelElement
 
 logger = logging.getLogger(__name__)
 
+# 各エレメントprim配下でメッシュを保持する子primの名前。この規約は
+# usd.py（作成元）/ gltf.py / scene_index.py の3箇所で参照されるため、
+# ここを唯一の正本とする。
+MESH_PRIM_NAME = "mesh"
+
 
 def create_materials(stage, materials: dict) -> dict:
     """マテリアル辞書から UsdPreviewSurface マテリアルを作成する。
@@ -58,7 +63,7 @@ def create_mesh(stage, path: str, geometry, material_prims: dict) -> None:
     """1 エレメント分のメッシュを USD 上に定義する。"""
     faces, vertices, indices, material_name, color, normals, _translate = geometry
 
-    mesh = UsdGeom.Mesh.Define(stage, path + "/mesh")
+    mesh = UsdGeom.Mesh.Define(stage, f"{path}/{MESH_PRIM_NAME}")
     mesh.CreatePointsAttr(vertices)
     mesh.CreateFaceVertexCountsAttr(faces)
     mesh.CreateFaceVertexIndicesAttr(indices)
@@ -188,7 +193,7 @@ def elements_from_stage(stage) -> list[VoxelElement]:
         if "GUID" not in cd or "class" not in cd:
             continue
 
-        mesh_prim = stage.GetPrimAtPath(prim.GetPath().AppendChild("mesh"))
+        mesh_prim = stage.GetPrimAtPath(prim.GetPath().AppendChild(MESH_PRIM_NAME))
         if not mesh_prim.IsValid():
             continue
 
