@@ -56,8 +56,8 @@ uv run ifc2usd voxelize output/ToyodaLab_structured.usda --fill
 - `<base>.json` — ボクセル JSON v2（`docs/viewer/spec.md` §2）。要素(GUID)ごとに
   Morton(Z-order)符号化された占有ボクセルの座標と色を格納する
 - `<base>.usda` — PointInstancer ボクセルレイヤー。正本USDを書き換えない独立ファイルで、
-  `voxelLOD` variantSet で `--size` ごとのLODを切替できる（`usdview` での確認は
-  `docs/viewer/` を参照）
+  `voxelLOD` variantSet で `--size` ごとのLODを切替できる（`usdview` での確認手順は
+  [`docs/viewer/usdview-checklist.md`](docs/viewer/usdview-checklist.md) 参照）
 
 ## glTF エクスポート（`export-gltf`）
 
