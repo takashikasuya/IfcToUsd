@@ -126,6 +126,8 @@ function forEachMeshOf(guid, callback) {
 let selectedGuid = null;
 
 function highlightMesh(mesh, on) {
+  // gltf.py/usd.py never emit multi-material meshes (one PBRMaterial per mesh),
+  // so mesh.material is always a single material here, never an Array.
   if (!mesh.material.emissive) return;
   if (on) {
     if (mesh.userData.__originalEmissive === undefined) {
@@ -138,6 +140,8 @@ function highlightMesh(mesh, on) {
 }
 
 function selectByGuid(guid) {
+  // Re-clicking the already-selected node is a no-op by design: this issue's
+  // scope is one-directional tree -> 3D sync, not a deselect/toggle affordance.
   if (selectedGuid === guid) return;
 
   if (selectedGuid !== null) {
