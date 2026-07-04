@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -97,3 +98,23 @@ def test_server_binds_to_localhost_only(usda, tmp_path):
         assert server.server_address[0] == "127.0.0.1"
     finally:
         server.server_close()
+
+
+def test_directory_listing_is_disabled_for_index_less_directories(usda, tmp_path):
+    """vendor/のようにindex.htmlを持たないディレクトリでも、
+    ファイル名一覧を返さない（404になる）。"""
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir)
+
+    server = make_server(workdir, port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/vendor/", timeout=5)
+        assert excinfo.value.code == 404
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)

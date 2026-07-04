@@ -198,7 +198,11 @@ def _run_serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
         workdir = Path(tmpdir)
         build_serve_directory(args.usd_path, workdir)
 
-        server = make_server(workdir, port=args.port)
+        try:
+            server = make_server(workdir, port=args.port)
+        except OSError as exc:
+            parser.error(f"could not listen on port {args.port}: {exc}")
+
         host, port = server.server_address[:2]
         url = f"http://{host}:{port}/"
         logger.info("Serving %s at %s (Ctrl+C to stop)", args.usd_path, url)

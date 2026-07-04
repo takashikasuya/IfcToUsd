@@ -49,11 +49,25 @@ def build_serve_directory(usd_path: Path, workdir: Path) -> Path:
     return workdir
 
 
+class _NoDirectoryListingHandler(http.server.SimpleHTTPRequestHandler):
+    """ディレクトリ一覧表示を無効化した静的ファイルハンドラ。
+
+    `vendor/` 配下のようにindex.htmlを持たないディレクトリでも、
+    標準の SimpleHTTPRequestHandler はファイル名一覧を返してしまう。
+    このツールが配信するのはユーザー自身のIFCから生成したファイルのみだが、
+    意図しない一覧公開を避けるため一律 404 にする。
+    """
+
+    def list_directory(self, path):  # noqa: D102 - stdlibのオーバーライド
+        self.send_error(404, "No permission to list directory")
+        return None
+
+
 def make_server(directory: Path, port: int = 8000) -> http.server.ThreadingHTTPServer:
     """`directory` を静的配信する HTTP サーバーを構築する（起動はしない）。
 
     127.0.0.1 にのみバインドする（外部ネットワークからの意図しない
     アクセスを避けるため）。`port=0` を渡すと OS が空きポートを選ぶ。
     """
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
+    handler = functools.partial(_NoDirectoryListingHandler, directory=str(directory))
     return http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
