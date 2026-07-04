@@ -9,6 +9,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 const viewport = document.getElementById("viewport");
 const treePanel = document.getElementById("tree-panel");
 const propertyPanel = document.getElementById("property-panel");
+const voxelLodSelect = document.getElementById("voxel-lod-select");
 
 const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
@@ -261,6 +262,16 @@ function buildVoxelLods(voxelDescription) {
   const matrix = new THREE.Matrix4();
   const color = new THREE.Color();
 
+  // loadScene()はページ読み込みにつき一度しか呼ばないため今は再構築されないが、
+  // 将来モデルの再読み込み経路が増えたときに<option>やvoxelLodsが際限なく
+  // 重複しないよう、念のため呼び出しごとに初期化しておく。ジオメトリ
+  // (_voxelUnitBox)は全LOD/全呼び出しで共有する1つのBoxGeometryなので
+  // disposeしない。マテリアルはmesh単位で毎回新規生成しているため、こちらは破棄する。
+  for (const mesh of voxelRoot.children) mesh.material?.dispose?.();
+  voxelRoot.clear();
+  voxelLods.length = 0;
+  voxelLodSelect.innerHTML = "";
+
   for (const lod of voxelDescription.lods) {
     const size = lod.size;
     const totalInstances = lod.elements.reduce((sum, el) => sum + el.indices.length, 0);
@@ -288,14 +299,57 @@ function buildVoxelLods(voxelDescription) {
     }
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    // 複数LODは同じ体積を異なる粒度で表現したものなので、既定では先頭
-    // （sizes指定順の1つ目）のみ可視にする。切替UIはE3-7で追加する。
-    mesh.visible = voxelLods.length === 0;
+    // 初期visibleは常にfalseにしておき、実際の可視状態はapplyDisplayState()に
+    // 一元化する（表示モード/アクティブLODの決定ロジックを1箇所にまとめるため）。
+    mesh.visible = false;
 
     voxelRoot.add(mesh);
     voxelLods.push({ size, mesh, instanceGuids });
+
+    const option = document.createElement("option");
+    option.value = String(voxelLods.length - 1);
+    option.textContent = `${size}m`;
+    voxelLodSelect.appendChild(option);
   }
 }
+
+// "mesh" | "voxel" | "both"。複数LODは同じ体積を異なる粒度で表現したものなので、
+// voxel/bothモードでも常にactiveVoxelLodIndexの1つだけを可視にする。
+// 既定値はindex.html側の<input checked>から読み取る（ハードコードして二重管理
+// すると、片方だけ書き換えたときにUI表示と実際の状態がずれてしまうため）。
+const _checkedDisplayModeInput = document.querySelector('input[name="display-mode"]:checked');
+let displayMode = _checkedDisplayModeInput ? _checkedDisplayModeInput.value : "both";
+let activeVoxelLodIndex = 0;
+
+function applyDisplayState() {
+  if (glbRoot) {
+    glbRoot.visible = displayMode === "mesh" || displayMode === "both";
+  }
+  const showVoxels = displayMode === "voxel" || displayMode === "both";
+  voxelLods.forEach((lod, index) => {
+    lod.mesh.visible = showVoxels && index === activeVoxelLodIndex;
+  });
+}
+
+function setDisplayMode(mode) {
+  displayMode = mode;
+  applyDisplayState();
+}
+
+function setActiveVoxelLodIndex(index) {
+  activeVoxelLodIndex = index;
+  applyDisplayState();
+}
+
+for (const input of document.querySelectorAll('input[name="display-mode"]')) {
+  input.addEventListener("change", (event) => {
+    if (event.target.checked) setDisplayMode(event.target.value);
+  });
+}
+
+voxelLodSelect.addEventListener("change", () => {
+  setActiveVoxelLodIndex(Number(voxelLodSelect.value));
+});
 
 async function loadVoxels(voxelsUrl) {
   const response = await fetch(voxelsUrl);
@@ -304,6 +358,7 @@ async function loadVoxels(voxelsUrl) {
   }
   const voxelDescription = await response.json();
   buildVoxelLods(voxelDescription);
+  applyDisplayState();
 }
 
 function findGuidOfObject(object) {
@@ -409,6 +464,7 @@ async function loadScene() {
   const gltf = await loader.loadAsync(sceneDescription.assets.gltf);
   modelRoot.add(gltf.scene);
   glbRoot = gltf.scene;
+  applyDisplayState();
 
   modelBoundingBox = new THREE.Box3().setFromObject(modelRoot);
   fitAll();
@@ -453,6 +509,10 @@ window.ifc2usdViewer = {
   getSelectedGuid: () => selectedGuid,
   voxelLods,
   mortonDecode,
+  getGlbRoot: () => glbRoot,
+  setDisplayMode,
+  getDisplayMode: () => displayMode,
+  setActiveVoxelLodIndex,
 };
 
 resize();
