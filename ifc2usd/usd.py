@@ -1,0 +1,173 @@
+"""USD ステージの構築: メッシュ・マテリアル・空間階層の書き出し。
+
+もとは ``IFC_to_USD.ipynb`` のセルに分散していた USD 生成ロジックを整理し、
+OpenUSD の現行 API（``MaterialBindingAPI.Apply`` など）に合わせて更新したもの。
+"""
+
+from __future__ import annotations
+
+import copy
+import logging
+
+import numpy as np
+from pxr import Gf, Kind, Sdf, Usd, UsdGeom, UsdShade
+
+logger = logging.getLogger(__name__)
+
+
+def create_materials(stage, materials: dict) -> dict:
+    """マテリアル辞書から UsdPreviewSurface マテリアルを作成する。
+
+    Returns:
+        マテリアル名 -> UsdShade.Material の辞書
+    """
+    metallic = 0.0
+    roughness = 1.0
+    material_prims: dict = {}
+
+    for name, (diffuse, specular, transparency) in materials.items():
+        path = Sdf.Path(f"/Materials/{name}")
+        mat = UsdShade.Material.Define(stage, path)
+        shader = UsdShade.Shader.Define(stage, path.AppendChild("PBRShader"))
+        shader.CreateIdAttr("UsdPreviewSurface")
+
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(diffuse[0], diffuse[1], diffuse[2])
+        )
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(metallic)
+
+        if specular:
+            shader.CreateInput("specularColor", Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(specular[0], specular[1], specular[2])
+            )
+        if transparency:
+            # IFC は transparency、UsdPreviewSurface は opacity なので変換する
+            shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(1.0 - transparency)
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.0)
+
+        mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        material_prims[name] = mat
+
+    return material_prims
+
+
+def create_mesh(stage, path: str, geometry, material_prims: dict) -> None:
+    """1 エレメント分のメッシュを USD 上に定義する。"""
+    faces, vertices, indices, material_name, color, normals, _translate = geometry
+
+    mesh = UsdGeom.Mesh.Define(stage, path + "/mesh")
+    mesh.CreatePointsAttr(vertices)
+    mesh.CreateFaceVertexCountsAttr(faces)
+    mesh.CreateFaceVertexIndicesAttr(indices)
+    mesh.CreateExtentAttr(UsdGeom.PointBased(mesh).ComputeExtent(mesh.GetPointsAttr().Get()))
+
+    # 法線を明示指定し、Catmull-Clark による再分割を無効化する
+    mesh.CreateNormalsAttr(normals)
+    mesh.CreateSubdivisionSchemeAttr("none")
+    mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+    mesh.CreateDoubleSidedAttr(False)
+
+    mesh.GetDisplayColorAttr().Set([Gf.Vec3f(color[0], color[1], color[2])])
+
+    mat = material_prims.get(material_name)
+    if mat is not None:
+        UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
+        UsdShade.MaterialBindingAPI(mesh).Bind(mat, UsdShade.Tokens.preview)
+
+
+def set_custom_data(stage, prim, props: dict) -> None:
+    """prim に IFC 由来のメタデータ（class/GUID/名称/緯度経度）を付与する。"""
+    target = stage.GetPrimAtPath(prim.GetPath())
+    target.SetCustomDataByKey("class", props["type"])
+    target.SetCustomDataByKey("GUID", props["GlobalId"])
+
+    for key in ("Name", "LongName", "Description"):
+        if key in props and props[key] is not None:
+            target.SetCustomDataByKey(key, props[key])
+
+    if "RefLatitude" in props:
+        lat = ".".join(str(i) for i in props["RefLatitude"]) if props["RefLatitude"] is not None else ""
+        lon = ".".join(str(i) for i in props["RefLongitude"]) if props["RefLongitude"] is not None else ""
+        target.SetCustomDataByKey("Latitude", lat)
+        target.SetCustomDataByKey("Longitude", lon)
+
+
+def append_prim(stage, props: dict, path: str, geometries: dict, material_prims: dict):
+    """空間階層に Xform prim を追加し、対応するジオメトリがあればメッシュを配置する。"""
+    prim = UsdGeom.Xform.Define(stage, path)
+    Usd.ModelAPI(prim).SetKind(Kind.Tokens.group)
+    set_custom_data(stage, prim, props)
+
+    guid = props["GlobalId"]
+    if guid in geometries:
+        geom_data = copy.copy(geometries[guid])
+        verts = geom_data[1]
+        t = geom_data[6]
+        # 変換行列 (3x3 回転 + 平行移動) を分解する
+        rows = [(t[i], t[i + 1], t[i + 2]) for i in range(0, 12, 3)]
+        offset = rows[3]
+        rotation = np.matrix((rows[0], rows[1], rows[2])).T
+        geom_data[1] = [np.ravel(np.dot(rotation, np.array(vert))).tolist() for vert in verts]
+
+        UsdGeom.XformCommonAPI(prim).SetTranslate(offset)
+        Usd.ModelAPI(prim).SetKind(Kind.Tokens.component)
+        create_mesh(stage, str(prim.GetPath()), geom_data, material_prims)
+    return prim
+
+
+def build_stage(ifc_file, geometries: dict, materials: dict, output_path: str, y_up: bool = False) -> None:
+    """geometries / materials から USD ステージを構築し、ファイルへ書き出す。"""
+    stage = Usd.Stage.CreateInMemory()
+    # シーンの単位を m にする
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y if y_up else UsdGeom.Tokens.z)
+
+    model_root = stage.DefinePrim("/IFC_Model", "Xform")
+    Usd.ModelAPI(model_root).SetKind(Kind.Tokens.assembly)
+    stage.SetDefaultPrim(model_root)
+
+    material_prims = create_materials(stage, materials)
+
+    from .ifc import get_properties  # 遅延 import で循環参照を避ける
+
+    def proc_elements(model, prim):
+        for rel in model.ContainsElements:
+            for element in rel.RelatedElements:
+                props = get_properties(element)
+                elem_prim = append_prim(
+                    stage, props, f"{prim.GetPath()}/Element_{props['id']}", geometries, material_prims
+                )
+                if len(element.IsDecomposedBy) > 0:
+                    for obj_model in element.IsDecomposedBy[0].RelatedObjects:
+                        props = get_properties(obj_model)
+                        append_prim(
+                            stage, props, f"{elem_prim.GetPath()}/Object_{props['id']}", geometries, material_prims
+                        )
+
+    props = get_properties(ifc_file.by_type("IfcSite")[0])
+    site = append_prim(stage, props, f"{model_root.GetPath()}/Site", geometries, material_prims)
+
+    props = get_properties(ifc_file.by_type("IfcBuilding")[0])
+    building = append_prim(stage, props, f"{site.GetPath()}/Building", geometries, material_prims)
+
+    for storey_model in ifc_file.by_type("IfcBuildingStorey"):
+        props = get_properties(storey_model)
+        storey_prim = append_prim(
+            stage, props, f"{building.GetPath()}/Storey_{props['id']}", geometries, material_prims
+        )
+
+        if storey_model.ContainsElements:
+            proc_elements(storey_model, storey_prim)
+
+        if len(storey_model.IsDecomposedBy) > 0:
+            assert len(storey_model.IsDecomposedBy) == 1
+            for space_model in storey_model.IsDecomposedBy[0].RelatedObjects:
+                props = get_properties(space_model)
+                space = append_prim(
+                    stage, props, f"{storey_prim.GetPath()}/Space_{props['id']}", geometries, material_prims
+                )
+                if space_model.ContainsElements:
+                    proc_elements(space_model, space)
+
+    stage.Export(output_path)
