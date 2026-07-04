@@ -10,43 +10,13 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
 import trimesh
-from pxr import Gf, Usd, UsdGeom
 
-from ifc2usd import convert
 from ifc2usd.voxel import morton_decode, morton_encode, voxelize_mesh
-
-FIXTURE = Path(__file__).parent / "fixtures" / "minimal.ifc"
-
-
-def _world_mesh(stage: Usd.Stage, mesh_path: str):
-    """USD メッシュの points をワールド座標へ変換し、(vertices, indices) を返す。"""
-    prim = stage.GetPrimAtPath(mesh_path)
-    mesh = UsdGeom.Mesh(prim)
-    xform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    points = [xform.Transform(Gf.Vec3d(*p)) for p in mesh.GetPointsAttr().Get()]
-    vertices = [(p[0], p[1], p[2]) for p in points]
-    indices = list(mesh.GetFaceVertexIndicesAttr().Get())
-    return vertices, indices
-
-
-@pytest.fixture(scope="module")
-def stage(tmp_path_factory) -> Usd.Stage:
-    out = tmp_path_factory.mktemp("usd") / "minimal.usda"
-    convert(FIXTURE, out)
-    return Usd.Stage.Open(str(out))
-
-
-def _wall_mesh_path(stage: Usd.Stage, name: str) -> str:
-    for prim in stage.Traverse():
-        cd = prim.GetCustomData()
-        if cd.get("class") == "IfcWall" and cd.get("Name") == name:
-            return str(prim.GetPath().AppendChild("mesh"))
-    raise AssertionError(f"wall not found: {name}")
+from tests.conftest import wall_mesh_path, world_mesh
 
 
 # --- Morton (Z-order) 符号化 ---
@@ -79,8 +49,8 @@ def test_morton_rejects_negative_coordinates():
 def test_voxelize_thin_wall_matches_analytic_box_count(stage):
     """薄い壁（厚み<size）は前後面が断面全体を覆うため fill と一致し、
     nx*ny*nz を解析的に計算できる。"""
-    mesh_path = _wall_mesh_path(stage, "Wall North")
-    vertices, indices = _world_mesh(stage, mesh_path)
+    mesh_path = wall_mesh_path(stage, "Wall North")
+    vertices, indices = world_mesh(stage, mesh_path)
     size = 0.5
 
     origin, voxels = voxelize_mesh(vertices, indices, size)
@@ -106,8 +76,8 @@ def test_voxelize_with_shared_origin_offsets_indices(stage):
     size = 0.5
     shared_origin = (0.0, 0.0, 0.0)
 
-    north_vertices, north_indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
-    east_vertices, east_indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall East"))
+    north_vertices, north_indices = world_mesh(stage, wall_mesh_path(stage, "Wall North"))
+    east_vertices, east_indices = world_mesh(stage, wall_mesh_path(stage, "Wall East"))
 
     _, north_voxels = voxelize_mesh(north_vertices, north_indices, size, origin=shared_origin)
     _, east_voxels = voxelize_mesh(east_vertices, east_indices, size, origin=shared_origin)
@@ -126,8 +96,8 @@ def test_voxelize_with_shared_origin_offsets_indices(stage):
 
 def test_voxelize_fill_mode_matches_surface_for_thin_wall(stage):
     """薄い壁は内部空洞がないため、fill=Trueでも表面占有と同じ結果になる。"""
-    mesh_path = _wall_mesh_path(stage, "Wall North")
-    vertices, indices = _world_mesh(stage, mesh_path)
+    mesh_path = wall_mesh_path(stage, "Wall North")
+    vertices, indices = world_mesh(stage, mesh_path)
     size = 0.5
 
     _, surface_voxels = voxelize_mesh(vertices, indices, size)
@@ -178,7 +148,7 @@ def test_voxelize_fill_of_grid_aligned_cube_fills_interior():
 
 
 def test_voxelize_rejects_non_positive_size(stage):
-    vertices, indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
+    vertices, indices = world_mesh(stage, wall_mesh_path(stage, "Wall North"))
     with pytest.raises(ValueError):
         voxelize_mesh(vertices, indices, size=0)
     with pytest.raises(ValueError):
@@ -186,7 +156,7 @@ def test_voxelize_rejects_non_positive_size(stage):
 
 
 def test_voxelize_rejects_non_finite_vertices(stage):
-    vertices, indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
+    vertices, indices = world_mesh(stage, wall_mesh_path(stage, "Wall North"))
     bad_vertices = list(vertices)
     bad_vertices[0] = (float("nan"), 0.0, 0.0)
     with pytest.raises(ValueError):
@@ -195,6 +165,6 @@ def test_voxelize_rejects_non_finite_vertices(stage):
 
 def test_voxelize_rejects_origin_above_mesh_bounds(stage):
     """共有originはメッシュ自身の範囲を含んでいなければならない。"""
-    vertices, indices = _world_mesh(stage, _wall_mesh_path(stage, "Wall North"))
+    vertices, indices = world_mesh(stage, wall_mesh_path(stage, "Wall North"))
     with pytest.raises(ValueError):
         voxelize_mesh(vertices, indices, size=0.5, origin=(10.0, 10.0, 10.0))

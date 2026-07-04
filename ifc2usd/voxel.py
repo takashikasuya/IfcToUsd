@@ -11,12 +11,26 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Sequence
+from typing import NamedTuple, Optional, Sequence
 
 import numpy as np
 import trimesh
 
 logger = logging.getLogger("ifc2usd")
+
+_JSON_VERSION = 2
+_UNITS = "m"
+
+
+class VoxelElement(NamedTuple):
+    """ボクセル化対象の1要素（IFCエレメント相当）。"""
+
+    guid: str
+    cls: str
+    name: Optional[str]
+    color: tuple[float, float, float]
+    vertices: Sequence[Sequence[float]]
+    indices: Sequence[int]
 
 
 def morton_encode(x: int, y: int, z: int) -> int:
@@ -203,3 +217,59 @@ def voxelize_mesh(
         occupied = surface
 
     return tuple(origin_arr.tolist()), occupied
+
+
+def scene_origin(elements: Sequence[VoxelElement]) -> tuple[float, float, float]:
+    """複数要素のワールド座標頂点から、共有originとなるシーン全体のAABB最小点を求める。"""
+    mins = [
+        np.asarray(el.vertices, dtype=np.float64).min(axis=0) for el in elements if len(el.vertices)
+    ]
+    if not mins:
+        raise ValueError("scene_origin requires at least one element with vertices")
+    return tuple(np.min(mins, axis=0).tolist())
+
+
+def build_voxel_json(
+    elements: Sequence[VoxelElement],
+    sizes: Sequence[float],
+    source: Optional[dict] = None,
+    up_axis: str = "Z",
+    fill: bool = False,
+) -> dict:
+    """`docs/viewer/spec.md` §2 のボクセル JSON v2 を構築する。
+
+    全要素・全LODで共有する単一の `origin`（シーン全体のワールドAABB最小点）を
+    用いるため、`origin + index*size` はどの要素・どのLODでも同じワールド座標系
+    に一致する。頂点を持たない要素は静かにスキップする。
+    """
+    origin = scene_origin(elements)
+
+    lods = []
+    for size in sizes:
+        lod_elements = []
+        for el in elements:
+            if not len(el.vertices):
+                continue
+            _, voxels = voxelize_mesh(el.vertices, el.indices, size, origin=origin, fill=fill)
+            if not voxels:
+                continue
+            indices = sorted(morton_encode(*v) for v in voxels)
+            lod_elements.append(
+                {
+                    "guid": el.guid,
+                    "class": el.cls,
+                    "name": el.name,
+                    "color": list(el.color),
+                    "indices": indices,
+                }
+            )
+        lods.append({"size": size, "elements": lod_elements})
+
+    return {
+        "version": _JSON_VERSION,
+        "units": _UNITS,
+        "upAxis": up_axis,
+        "source": source or {},
+        "origin": list(origin),
+        "lods": lods,
+    }
