@@ -11,7 +11,7 @@ import json as jsonlib
 from pathlib import Path
 
 import trimesh
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 from ifc2usd import convert
 from ifc2usd.gltf import export_gltf
@@ -110,6 +110,66 @@ def test_wall_colors_reflected_as_pbr_base_color(tmp_path):
         material_index = primitive["material"]
         base_color = materials[material_index]["pbrMetallicRoughness"]["baseColorFactor"]
         assert tuple(round(c, 2) for c in base_color[:3]) == tuple(round(c, 2) for c in expected_color)
+
+
+def test_glb_primitives_have_normal_accessor(tmp_path):
+    """法線がGLBに含まれる（POSITIONのみでNORMALが欠落しない）。"""
+    usda = tmp_path / "minimal.usda"
+    convert(FIXTURE, usda)
+    stage = Usd.Stage.Open(str(usda))
+
+    out = tmp_path / "minimal.glb"
+    export_gltf(stage, str(out))
+
+    gltf = _gltf_json_from_glb(out)
+    for mesh in gltf["meshes"]:
+        for primitive in mesh["primitives"]:
+            assert "NORMAL" in primitive["attributes"]
+
+
+def test_material_without_binding_falls_back_to_display_color(tmp_path):
+    """マテリアル未バインドのメッシュは、灰色決め打ちではなくdisplayColorを使う。"""
+    from pxr import Gf
+
+    from ifc2usd.gltf import _mesh_color_and_opacity
+
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/Unmaterialed")
+    mesh.CreatePointsAttr([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    mesh.GetDisplayColorAttr().Set([Gf.Vec3f(0.1, 0.2, 0.3)])
+
+    r, g, b, alpha = _mesh_color_and_opacity(mesh, stage)
+    assert (round(r, 3), round(g, 3), round(b, 3)) == (0.1, 0.2, 0.3)
+    assert alpha == 1.0
+
+
+def test_transparent_material_opacity_is_reflected_in_alpha(tmp_path):
+    """opacityが1未満のマテリアル（例: IfcWindow相当）は、baseColorFactorのalphaと
+    alphaMode=BLENDに反映される（1.0固定で無視されない）。"""
+    from pxr import Gf, Sdf, UsdShade
+
+    from ifc2usd.gltf import _mesh_color_and_opacity
+
+    stage = Usd.Stage.CreateInMemory()
+    mat = UsdShade.Material.Define(stage, "/Materials/Glass")
+    shader = UsdShade.Shader.Define(stage, "/Materials/Glass/PBRShader")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.6, 0.8, 0.9))
+    shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.2)  # transparency=0.8相当
+    mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+    mesh = UsdGeom.Mesh.Define(stage, "/Window")
+    mesh.CreatePointsAttr([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
+    UsdShade.MaterialBindingAPI(mesh).Bind(mat, UsdShade.Tokens.preview)
+
+    r, g, b, alpha = _mesh_color_and_opacity(mesh, stage)
+    assert round(alpha, 2) == 0.2
+    assert (round(r, 2), round(g, 2), round(b, 2)) == (0.6, 0.8, 0.9)
 
 
 def test_export_reflects_y_up_conversion(tmp_path):
