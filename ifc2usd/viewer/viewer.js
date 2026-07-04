@@ -10,6 +10,7 @@ const viewport = document.getElementById("viewport");
 const treePanel = document.getElementById("tree-panel");
 const propertyPanel = document.getElementById("property-panel");
 const voxelLodSelect = document.getElementById("voxel-lod-select");
+const sectionHeightSlider = document.getElementById("section-height-slider");
 
 const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
@@ -18,7 +19,14 @@ scene.background = new THREE.Color(0x202020);
 
 const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 10000);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// preserveDrawingBuffer: E2Eテスト(Playwright)がcanvasを2D canvasへdrawImageして
+// ピクセルを読み取れるようにする（既定falseだと描画バッファがcompositing後に
+// クリアされうるため、rAFループの外からの読み取りが不安定になる）。このアプリは
+// 毎フレーム再描画し続けるため、実ユーザーにまで常時バッファコピーのコストを
+// 払わせないよう、URLに`?e2e`が付いているときだけ有効にする
+// （E2Eテストは`_wait_for_load`相当のヘルパーでこのクエリ付きURLへ遷移する）。
+const isE2ETest = new URLSearchParams(window.location.search).has("e2e");
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: isE2ETest });
 renderer.setPixelRatio(window.devicePixelRatio);
 viewport.appendChild(renderer.domElement);
 
@@ -83,6 +91,41 @@ let modelBoundingBox = new THREE.Box3();
 function fitAll() {
   fitCameraToBox(modelBoundingBox);
 }
+
+// 断面（Z高さ）クリップ平面。normal=(0,-1,0)なので distance = -y + constant となり、
+// レンダラーは distance<0（= y>constant のワールド座標）のフラグメントを切り捨てる。
+// つまりスライダーは「その高さまで（それより上を隠す）」の断面を表す。
+// modelRootの回転（Z-UP→Y-UPの吸収）はメッシュ/ボクセルの頂点座標そのものに
+// 効くため、このプレーンはワールド(three.jsのY)座標系で常に水平＝階層を反映する。
+//
+// constantの初期値はInfinityではなく大きな有限値にする: three.jsは平面をGPUへ
+// 送る際に coplanarPoint = normal * (-constant) を計算しており、
+// (-1) * (-Infinity) = Infinity * 0 が NaN になるため、モデル読み込み前の毎フレーム
+// 描画でNaNをシェーダーuniformへ渡し続けてしまう（実害はまだ無いが不健全）。
+const _NO_CLIP_SENTINEL = 1e12;
+const sectionClipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), _NO_CLIP_SENTINEL);
+renderer.clippingPlanes = [sectionClipPlane];
+
+function setSectionClipHeight(height) {
+  sectionClipPlane.constant = height;
+  if (Number(sectionHeightSlider.value) !== height) {
+    sectionHeightSlider.value = String(height);
+  }
+}
+
+function initSectionClipRange(box) {
+  if (box.isEmpty()) return;
+  sectionHeightSlider.min = String(box.min.y);
+  sectionHeightSlider.max = String(box.max.y);
+  sectionHeightSlider.step = String(Math.max((box.max.y - box.min.y) / 200, 1e-6));
+  sectionHeightSlider.disabled = false;
+  // 既定はスライダー最大＝クリップなし（モデル全体が見える状態）。
+  setSectionClipHeight(box.max.y);
+}
+
+sectionHeightSlider.addEventListener("input", () => {
+  sectionClipPlane.constant = Number(sectionHeightSlider.value);
+});
 
 /**
  * 現在のカメラ-ターゲット距離に応じてnear/farを更新する。fitCameraToBoxは
@@ -434,6 +477,12 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(pointerNdc, camera);
+  // 既知の制約（Issue #18時点で未対応、意図的に据え置き）: three.jsのRaycasterは
+  // renderer.clippingPlanesを考慮しないため、断面クリップで視覚的に隠れている
+  // ジオメトリも普通にクリックで選択できてしまう。FR-10自体は表示上の断面機能で
+  // あり選択への影響は要件外のため、このissueでは対応しない。必要になれば
+  // ここで `intersections.filter(i => i.point.y <= sectionClipPlane.constant)` の
+  // ようなフィルタを追加する。
   const intersections = raycaster.intersectObjects(currentRaycastTargets(), true);
   if (intersections.length === 0) return;
 
@@ -499,6 +548,7 @@ async function loadScene() {
 
   modelBoundingBox = new THREE.Box3().setFromObject(modelRoot);
   fitAll();
+  initSectionClipRange(modelBoundingBox);
 
   buildObjectsByGuid();
   buildNodesByGuid(sceneDescription.tree);
@@ -545,6 +595,8 @@ window.ifc2usdViewer = {
   getDisplayMode: () => displayMode,
   setActiveVoxelLodIndex,
   currentRaycastTargets,
+  getSectionClipHeight: () => sectionClipPlane.constant,
+  setSectionClipHeight,
 };
 
 resize();
