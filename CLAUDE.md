@@ -69,7 +69,11 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   fallback call — cells outside the band are `None`/transparent rather than triggering an
   unbounded per-cell direct computation) for the web viewer to render as a color-mapped overlay
   plane. A `_MAX_GRID_CELLS` cap skips (with a warning, not silently) any element whose XY
-  footprint at the requested voxel size would produce an oversized grid.
+  footprint at the requested voxel size would produce an oversized grid; a separate
+  `_MAX_SURFACE_VOXELS` cap catches what the footprint cap can't — a tall/thin element (small
+  XY footprint, large Z extent) that would still drive `build_narrow_band_sdf`'s brute-force
+  distance computation (which scales with 3D surface-voxel count, not XY footprint) into
+  excessive memory/CPU.
 - `gltf.py` — USD→glTF(GLB) via trimesh. Walks the USD prim tree from the default prim,
   building a `trimesh.Scene` graph using each prim's own local transform; explodes deduplicated
   mesh points through the face-vertex-index array so per-corner normals line up 1:1. Writes

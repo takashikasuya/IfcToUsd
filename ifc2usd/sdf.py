@@ -138,12 +138,17 @@ def build_narrow_band_sdf(
 
 
 def clearance(point: Sequence[float], sdf: NarrowBandSDF) -> Optional[float]:
-    """任意のワールド座標点から最近傍の占有表面までの距離を返す。
+    """任意のワールド座標点から最近傍の占有表面までの距離（常に非負）を返す。
 
-    narrow-band内（`sdf.values`に格納済み）ならその値をそのまま返す。band外の
-    点は、`sdf.surface_voxels`に対する直接計算にフォールバックする——
-    narrow-bandはメモリ節約のための最適化であり、呼び出し側がband境界を
-    意識せず常に有効な距離を得られるようにするため。`surface_voxels`が
+    narrow-band内なら `sdf.values` の格納値を、band外なら `sdf.surface_voxels`
+    に対する直接計算にフォールバックして求める——narrow-bandはメモリ節約のための
+    最適化であり、呼び出し側がband境界を意識せず常に有効な距離を得られるように
+    するため。`sdf.values` 自体は内部/外部の符号付き距離（負=内部）だが、
+    band外フォールバックは符号を判定する材料（`solid_voxels`）を持たないため
+    常に非負の大きさしか返せない。`clearance()` はこの境界をまたいでも呼び出し側
+    から見た意味が変わらないよう、band内ヒットも `abs()` を取り常に非負の
+    「距離」として統一する（内部/外部を区別したい呼び出し元は、band内である
+    ことが分かっているなら `sdf.values` を直接引くこと）。`surface_voxels`が
     空の場合のみNoneを返す（クエリ対象が無い）。
     """
     point_arr = np.asarray(point, dtype=np.float64)
@@ -151,7 +156,7 @@ def clearance(point: Sequence[float], sdf: NarrowBandSDF) -> Optional[float]:
     voxel_index = tuple(int(np.floor(v)) for v in (point_arr - origin_arr) / sdf.size)
 
     if voxel_index in sdf.values:
-        return sdf.values[voxel_index]
+        return abs(sdf.values[voxel_index])
 
     if not sdf.surface_voxels:
         return None

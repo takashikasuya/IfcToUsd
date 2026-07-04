@@ -157,3 +157,25 @@ def test_clearance_fallback_respects_nonzero_origin():
     far_point = (origin[0] + 10.0, origin[1] + 2.5, origin[2] + 2.5)
     result = clearance(far_point, sdf)
     assert result == pytest.approx(10.0 - 4.5, abs=1e-6)
+
+
+def test_clearance_is_always_non_negative_even_for_interior_points():
+    """回帰テスト（PRレビューで発見）: clearance()の意味は「距離」であるべきだが、
+    band内ヒットはsdf.valuesの符号付き値（内部=負）をそのまま返しており、
+    band外フォールバック（常に非負の大きさのみ）と符号の扱いが不整合だった
+    （呼び出し側から見て、band境界をまたぐとclearance()の意味が変わってしまう）。
+    band内・band外のどちらでも常に非負の距離を返すことを確認する。"""
+    size = 1.0
+    surface = _cube_shell(0, 4)
+    solid = _cube_solid(0, 4)
+    sdf = build_narrow_band_sdf(surface, solid, ORIGIN0, size=size, band_width=2)
+
+    # 表面のすぐ内側、band内の内部点。sdf.values自体は負値のはず。
+    interior_voxel = (1, 2, 2)
+    assert sdf.values[interior_voxel] < 0
+
+    interior_point = (1.5, 2.5, 2.5)
+    result = clearance(interior_point, sdf)
+    assert result is not None
+    assert result >= 0
+    assert result == pytest.approx(abs(sdf.values[interior_voxel]))
