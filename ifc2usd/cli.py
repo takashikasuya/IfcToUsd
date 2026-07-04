@@ -16,6 +16,7 @@ import json
 import logging
 import sys
 import tempfile
+import webbrowser
 from pathlib import Path
 
 import ifcopenshell
@@ -25,6 +26,7 @@ from tqdm import tqdm
 from . import __version__
 from .gltf import export_gltf
 from .ifc import create_settings, get_geometry
+from .serve import build_serve_directory, make_server
 from .usd import build_stage, elements_from_stage
 from .voxel import build_voxel_json
 
@@ -178,6 +180,42 @@ def _run_export_gltf(args: argparse.Namespace, parser: argparse.ArgumentParser) 
     return 0
 
 
+def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("usd_path", type=Path, help="Path to a converted .usda/.usd/.usdc file")
+    parser.add_argument("--port", type=int, default=8000, help="Port to listen on (default: 8000)")
+    parser.add_argument(
+        "--no-open", action="store_true", help="Do not open a browser automatically"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+
+def _run_serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _configure_logging(args.verbose)
+    if not args.usd_path.is_file():
+        parser.error(f"USD file not found: {args.usd_path}")
+
+    with tempfile.TemporaryDirectory(prefix="ifc2usd_serve_") as tmpdir:
+        workdir = Path(tmpdir)
+        build_serve_directory(args.usd_path, workdir)
+
+        server = make_server(workdir, port=args.port)
+        host, port = server.server_address[:2]
+        url = f"http://{host}:{port}/"
+        logger.info("Serving %s at %s (Ctrl+C to stop)", args.usd_path, url)
+
+        if not args.no_open:
+            webbrowser.open(url)
+
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("Stopping server")
+        finally:
+            server.server_close()
+
+    return 0
+
+
 # サブコマンド名 -> (引数登録関数, 実行関数, help文字列)。
 # _build_parser と _normalize_argv の両方がここを唯一の正本として参照するため、
 # 新しいサブコマンド（voxelize/export-gltf/serve）を追加する際はここに1エントリ
@@ -198,6 +236,11 @@ _COMMANDS: dict[str, tuple] = {
         _add_export_gltf_arguments,
         _run_export_gltf,
         "Export a converted USD stage to a glTF (GLB) file.",
+    ),
+    "serve": (
+        _add_serve_arguments,
+        _run_serve,
+        "Serve a converted USD stage as a local web viewer.",
     ),
 }
 
