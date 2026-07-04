@@ -23,6 +23,7 @@ from pxr import Usd
 from tqdm import tqdm
 
 from . import __version__
+from .gltf import export_gltf
 from .ifc import create_settings, get_geometry
 from .usd import build_stage, elements_from_stage
 from .voxel import build_voxel_json
@@ -151,6 +152,32 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     return 0
 
 
+def _default_gltf_output(input_path: Path) -> Path:
+    return Path("output") / f"{input_path.stem}.glb"
+
+
+def _add_export_gltf_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("usd_path", type=Path, help="Path to a converted .usda/.usd/.usdc file")
+    parser.add_argument(
+        "-o", "--output", type=Path, default=None,
+        help="Output .glb path (default: output/<name>.glb)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+
+def _run_export_gltf(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _configure_logging(args.verbose)
+    if not args.usd_path.is_file():
+        parser.error(f"USD file not found: {args.usd_path}")
+
+    stage = Usd.Stage.Open(str(args.usd_path))
+    output_path = args.output or _default_gltf_output(args.usd_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    export_gltf(stage, str(output_path))
+    logger.info("Wrote GLB: %s", output_path)
+    return 0
+
+
 # サブコマンド名 -> (引数登録関数, 実行関数, help文字列)。
 # _build_parser と _normalize_argv の両方がここを唯一の正本として参照するため、
 # 新しいサブコマンド（voxelize/export-gltf/serve）を追加する際はここに1エントリ
@@ -166,6 +193,11 @@ _COMMANDS: dict[str, tuple] = {
         _add_voxelize_arguments,
         _run_voxelize,
         "Voxelize a converted USD stage (or IFC file) into occupancy voxel JSON.",
+    ),
+    "export-gltf": (
+        _add_export_gltf_arguments,
+        _run_export_gltf,
+        "Export a converted USD stage to a glTF (GLB) file.",
     ),
 }
 
