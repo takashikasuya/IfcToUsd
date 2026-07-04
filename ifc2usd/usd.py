@@ -12,6 +12,8 @@ import logging
 import numpy as np
 from pxr import Gf, Kind, Sdf, Usd, UsdGeom, UsdShade
 
+from .voxel import VoxelElement
+
 logger = logging.getLogger(__name__)
 
 
@@ -172,3 +174,46 @@ def build_stage(ifc_file, geometries: dict, materials: dict, output_path: str, y
                     proc_elements(space_model, space)
 
     stage.Export(output_path)
+
+
+def elements_from_stage(stage) -> list[VoxelElement]:
+    """変換済み USD ステージから、ボクセル化対象の要素情報を抽出する。
+
+    `append_prim` が付与する規約（customData の GUID/class/Name、子 prim
+    "mesh"、UsdPreviewSurface の diffuseColor バインディング）に依存する。
+    """
+    elements: list[VoxelElement] = []
+    for prim in stage.Traverse():
+        cd = prim.GetCustomData()
+        if "GUID" not in cd or "class" not in cd:
+            continue
+
+        mesh_prim = stage.GetPrimAtPath(prim.GetPath().AppendChild("mesh"))
+        if not mesh_prim.IsValid():
+            continue
+
+        mesh = UsdGeom.Mesh(mesh_prim)
+        xform = UsdGeom.Xformable(mesh_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        points = mesh.GetPointsAttr().Get() or []
+        vertices = [tuple(xform.Transform(Gf.Vec3d(*p))) for p in points]
+        indices = list(mesh.GetFaceVertexIndicesAttr().Get() or [])
+
+        color = (0.0, 0.0, 0.0)
+        mat_path = UsdShade.MaterialBindingAPI(mesh).GetDirectBinding().GetMaterialPath()
+        if mat_path:
+            shader = UsdShade.Shader(stage.GetPrimAtPath(mat_path.AppendChild("PBRShader")))
+            diffuse = shader.GetInput("diffuseColor").Get()
+            if diffuse is not None:
+                color = (diffuse[0], diffuse[1], diffuse[2])
+
+        elements.append(
+            VoxelElement(
+                guid=cd["GUID"],
+                cls=cd["class"],
+                name=cd.get("Name"),
+                color=color,
+                vertices=vertices,
+                indices=indices,
+            )
+        )
+    return elements

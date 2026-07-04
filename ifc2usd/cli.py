@@ -12,17 +12,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 import ifcopenshell
+from pxr import Usd
 from tqdm import tqdm
 
+from . import __version__
 from .ifc import create_settings, get_geometry
-from .usd import build_stage
+from .usd import build_stage, elements_from_stage
+from .voxel import build_voxel_json
 
 logger = logging.getLogger("ifc2usd")
+
+_USD_EXTENSIONS = (".usd", ".usda", ".usdc")
 
 
 def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
@@ -75,6 +82,68 @@ def _run_convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
     return 0
 
 
+def _default_voxel_output(input_path: Path) -> Path:
+    return Path("output") / f"{input_path.stem}_voxels"
+
+
+def _add_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "input_path", type=Path, help="Path to a converted .usda/.usd (recommended) or a source .ifc file"
+    )
+    parser.add_argument(
+        "--size", type=float, action="append", dest="sizes",
+        help="Voxel size in meters (repeatable for multiple LODs; default: 0.5)",
+    )
+    parser.add_argument(
+        "--fill", action="store_true", help="Include interior fill in addition to surface occupancy"
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, default=None,
+        help="Output base path without extension (default: output/<name>_voxels)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+
+def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    if not args.input_path.is_file():
+        parser.error(f"input file not found: {args.input_path}")
+
+    sizes = args.sizes or [0.5]
+    suffix = args.input_path.suffix.lower()
+
+    if suffix in _USD_EXTENSIONS:
+        stage = Usd.Stage.Open(str(args.input_path))
+        elements = elements_from_stage(stage)
+        source_name = args.input_path.name
+    elif suffix == ".ifc":
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_usda = Path(tmpdir) / f"{args.input_path.stem}_structured.usda"
+            convert(args.input_path, tmp_usda)
+            stage = Usd.Stage.Open(str(tmp_usda))
+            elements = elements_from_stage(stage)
+        source_name = tmp_usda.name
+    else:
+        parser.error(f"unsupported input file type: {suffix or args.input_path}")
+
+    result = build_voxel_json(
+        elements,
+        sizes=sizes,
+        source={"usd": source_name, "generator": f"ifc2usd {__version__}"},
+        fill=args.fill,
+    )
+
+    output_base = args.output or _default_voxel_output(args.input_path)
+    output_base.parent.mkdir(parents=True, exist_ok=True)
+    json_path = output_base.with_suffix(".json")
+    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    logger.info("Wrote voxel JSON: %s", json_path)
+    return 0
+
+
 # サブコマンド名 -> (引数登録関数, 実行関数, help文字列)。
 # _build_parser と _normalize_argv の両方がここを唯一の正本として参照するため、
 # 新しいサブコマンド（voxelize/export-gltf/serve）を追加する際はここに1エントリ
@@ -85,6 +154,11 @@ _COMMANDS: dict[str, tuple] = {
         _add_convert_arguments,
         _run_convert,
         "Convert an IFC model into a structured OpenUSD stage (default command).",
+    ),
+    "voxelize": (
+        _add_voxelize_arguments,
+        _run_voxelize,
+        "Voxelize a converted USD stage (or IFC file) into occupancy voxel JSON.",
     ),
 }
 
