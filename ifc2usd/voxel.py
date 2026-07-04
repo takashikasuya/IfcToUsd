@@ -15,6 +15,7 @@ from typing import NamedTuple, Optional, Sequence
 
 import numpy as np
 import trimesh
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 logger = logging.getLogger("ifc2usd")
 
@@ -281,3 +282,108 @@ def build_voxel_json(
         "origin": list(origin),
         "lods": lods,
     }
+
+
+def _variant_name(size: float) -> str:
+    return f"size_{size}".replace(".", "_")
+
+
+def build_voxel_stage(
+    elements: Sequence[VoxelElement],
+    sizes: Sequence[float],
+    reference_asset_path: str,
+    output_path: str,
+    reference_prim_path: str = "/IFC_Model",
+    up_axis: str = "Z",
+    fill: bool = False,
+) -> str:
+    """`docs/viewer/spec.md` §3 の PointInstancer ボクセルレイヤーを構築し、
+    `output_path` へ書き出す。
+
+    正本 USD（`reference_asset_path`）への reference のみを持つ独立したレイヤーで、
+    正本自体は書き換えない。`reference_asset_path` は `output_path` から見た
+    相対パスにすること。
+
+    書き出しは `stage.GetRootLayer().Export(...)` を用いる（内部の実装詳細だが
+    重要な注意点）。`Usd.Stage.Export()` はステージを「現在選択中のvariantで
+    合成された1枚のフラットな結果」として書き出すため、variantSet自体（他の
+    variantの内容や `variantSets`/`variants` の合成情報）が失われる。variantを
+    ビューワー側で切り替え可能な形で保持するには、raw な root layer をそのまま
+    書き出す必要がある。この関数がその区別を吸収するため、呼び出し側は本関数の
+    返り値（書き出し先パス）だけを見ればよい。
+
+    要素（GUID）ごとに1 prototype（サイズ・displayColor付きCube）を割り当て、
+    `customData["elementRanges"]` に GUID -> [start, count]（positions/
+    protoIndices 内でのインスタンス範囲）を記録し、ビューワーからの逆引きを
+    可能にする。LODサイズごとに `voxelLOD` variantSet の1 variantを対応させ、
+    既定 variant は `sizes` の先頭とする。
+    """
+    origin = scene_origin(elements)
+
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y if up_axis == "Y" else UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+
+    root_path = Sdf.Path(reference_prim_path)
+    root = UsdGeom.Xform.Define(stage, root_path)
+    root.GetPrim().GetReferences().AddReference(reference_asset_path, root_path)
+    stage.SetDefaultPrim(root.GetPrim())
+
+    voxels_path = root_path.AppendChild("Voxels")
+    instancer = UsdGeom.PointInstancer.Define(stage, voxels_path)
+    UsdGeom.Imageable(instancer.GetPrim()).CreatePurposeAttr().Set(UsdGeom.Tokens.proxy)
+
+    prototypes_path = voxels_path.AppendChild("Prototypes")
+    UsdGeom.Scope.Define(stage, prototypes_path)
+
+    variant_set = instancer.GetPrim().GetVariantSets().AddVariantSet("voxelLOD")
+
+    for size in sizes:
+        variant_name = _variant_name(size)
+        variant_set.AddVariant(variant_name)
+        variant_set.SetVariantSelection(variant_name)
+        with variant_set.GetVariantEditContext():
+            positions: list = []
+            proto_indices: list = []
+            proto_targets: list = []
+            ranges: dict = {}
+
+            for el in elements:
+                if not len(el.vertices):
+                    continue
+                _, voxels = voxelize_mesh(el.vertices, el.indices, size, origin=origin, fill=fill)
+                voxel_list = sorted(voxels)
+
+                start = len(positions)
+                ranges[el.guid] = [start, len(voxel_list)]
+                if not voxel_list:
+                    # このLODでは占有ボクセル0個。prototype/instanceは作らず
+                    # rangeのみ記録する（JSON v2ライターと同じ「静かに消さない」方針）。
+                    continue
+
+                proto_index = len(proto_targets)
+                for ix, iy, iz in voxel_list:
+                    positions.append(
+                        Gf.Vec3f(
+                            origin[0] + (ix + 0.5) * size,
+                            origin[1] + (iy + 0.5) * size,
+                            origin[2] + (iz + 0.5) * size,
+                        )
+                    )
+                    proto_indices.append(proto_index)
+
+                cube_path = prototypes_path.AppendChild(f"{variant_name}_Element_{proto_index}")
+                cube = UsdGeom.Cube.Define(stage, cube_path)
+                cube.CreateSizeAttr().Set(size)
+                cube.GetDisplayColorAttr().Set([Gf.Vec3f(*el.color)])
+                proto_targets.append(cube_path)
+
+            instancer.CreatePositionsAttr().Set(positions)
+            instancer.CreateProtoIndicesAttr().Set(proto_indices)
+            instancer.CreatePrototypesRel().SetTargets(proto_targets)
+            instancer.GetPrim().SetCustomDataByKey("elementRanges", ranges)
+
+    variant_set.SetVariantSelection(_variant_name(sizes[0]))
+
+    stage.GetRootLayer().Export(str(output_path))
+    return str(output_path)
