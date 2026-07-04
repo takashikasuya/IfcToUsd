@@ -14,9 +14,17 @@ from .usd import MESH_PRIM_NAME
 
 _SCHEMA_VERSION = 1
 
+# usd.py の set_custom_data が実際に書き込むキーのみを通す。prim.GetCustomData()は
+# これに加えてUSDスキーマ登録済みのdocumentation由来customData（例:
+# "userDocBrief"）まで合成して返してくるため、素通しするとIFCと無関係な
+# スキーマ説明文がプロパティパネルに漏れてしまう。
+# usd.py の set_custom_data() がキーを追加/変更したら、ここも合わせて更新すること。
+_METADATA_KEYS = ("GUID", "class", "Name", "LongName", "Description", "Latitude", "Longitude")
+
 
 def _tree_node(prim: Usd.Prim) -> dict:
-    cd = dict(prim.GetCustomData())
+    all_custom_data = prim.GetCustomData()
+    cd = {key: all_custom_data[key] for key in _METADATA_KEYS if key in all_custom_data}
     children = [
         _tree_node(child) for child in prim.GetChildren() if child.GetName() != MESH_PRIM_NAME
     ]

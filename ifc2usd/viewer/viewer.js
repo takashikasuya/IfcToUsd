@@ -8,6 +8,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const viewport = document.getElementById("viewport");
 const treePanel = document.getElementById("tree-panel");
+const propertyPanel = document.getElementById("property-panel");
 
 const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
@@ -123,6 +124,46 @@ function forEachMeshOf(guid, callback) {
   });
 }
 
+// guid -> scene.json のツリーノード（class/customData等）。プロパティパネル表示用
+// （3Dやツリーの選択と違い、objectsByGuidにはUSDのcustomDataが載っていないため別管理）。
+const nodesByGuid = new Map();
+
+function buildNodesByGuid(tree) {
+  nodesByGuid.clear();
+  function walk(nodes) {
+    for (const node of nodes) {
+      nodesByGuid.set(node.guid, node);
+      walk(node.children);
+    }
+  }
+  walk(tree);
+}
+
+function getBoundingBoxOfGuid(guid) {
+  const obj = objectsByGuid.get(guid);
+  if (!obj) return new THREE.Box3();
+  return new THREE.Box3().setFromObject(obj);
+}
+
+function renderPropertyPanel(guid) {
+  propertyPanel.innerHTML = "";
+  if (guid === null) return;
+
+  const node = nodesByGuid.get(guid);
+  if (!node) return;
+
+  const dl = document.createElement("dl");
+  for (const [key, value] of Object.entries(node.customData)) {
+    const dt = document.createElement("dt");
+    dt.textContent = key;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  }
+  propertyPanel.appendChild(dl);
+}
+
 let selectedGuid = null;
 
 function highlightMesh(mesh, on) {
@@ -157,7 +198,58 @@ function selectByGuid(guid) {
     const li = treePanel.querySelector(`li[data-guid="${guid}"]`);
     if (li) li.classList.add("selected");
   }
+
+  renderPropertyPanel(guid);
 }
+
+function findGuidOfObject(object) {
+  let current = object;
+  while (current) {
+    if (current.userData && current.userData.guid) return current.userData.guid;
+    current = current.parent;
+  }
+  return null;
+}
+
+const raycaster = new THREE.Raycaster();
+const pointerNdc = new THREE.Vector2();
+let pointerDownPosition = null;
+
+// OrbitControlsのドラッグ操作でも同じ要素上でpointerdown/upが発火するため、
+// 移動距離が小さい（=ドラッグではなくクリック）場合のみ選択レイキャストを行う。
+const CLICK_DRAG_THRESHOLD_PX = 5;
+
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  // isPrimary除外でマルチタッチの2本目以降を無視。button!==0除外で右クリック
+  // (OrbitControlsのpan操作)・中クリックを選択レイキャストの対象から外す。
+  if (!event.isPrimary || event.button !== 0) return;
+  pointerDownPosition = { x: event.clientX, y: event.clientY };
+});
+
+renderer.domElement.addEventListener("pointercancel", () => {
+  pointerDownPosition = null;
+});
+
+renderer.domElement.addEventListener("pointerup", (event) => {
+  const downPosition = pointerDownPosition;
+  pointerDownPosition = null;
+  if (!downPosition || !event.isPrimary || event.button !== 0) return;
+
+  const dx = event.clientX - downPosition.x;
+  const dy = event.clientY - downPosition.y;
+  if (Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD_PX) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(pointerNdc, camera);
+  const intersections = raycaster.intersectObjects(modelRoot.children, true);
+  if (intersections.length === 0) return;
+
+  const guid = findGuidOfObject(intersections[0].object);
+  if (guid !== null) selectByGuid(guid);
+});
 
 function renderTreeNode(node) {
   const li = document.createElement("li");
@@ -214,6 +306,7 @@ async function loadScene() {
   fitAll();
 
   buildObjectsByGuid();
+  buildNodesByGuid(sceneDescription.tree);
   renderTree(sceneDescription.tree);
 
   return sceneDescription;
@@ -236,6 +329,7 @@ window.ifc2usdViewer = {
   fitCameraToBox,
   fitAll,
   getBoundingBox: () => modelBoundingBox,
+  getBoundingBoxOfGuid,
   selectByGuid,
   getSelectedGuid: () => selectedGuid,
 };
