@@ -114,6 +114,37 @@ def test_one_prototype_per_element_with_display_color(workspace):
         assert cube.GetSizeAttr().Get() == 0.5
 
 
+def test_rejects_empty_sizes(tmp_path):
+    structured = tmp_path / "minimal.usda"
+    convert(FIXTURE, structured)
+    stage = Usd.Stage.Open(str(structured))
+    elements = elements_from_stage(stage)
+
+    with pytest.raises(ValueError):
+        build_voxel_stage(
+            elements, sizes=[], reference_asset_path="minimal.usda",
+            output_path=str(tmp_path / "voxels.usda"),
+        )
+
+
+def test_duplicate_sizes_do_not_create_duplicate_variants(tmp_path):
+    structured = tmp_path / "minimal.usda"
+    convert(FIXTURE, structured)
+    stage = Usd.Stage.Open(str(structured))
+    elements = elements_from_stage(stage)
+
+    voxels_path = tmp_path / "voxels.usda"
+    build_voxel_stage(
+        elements, sizes=[0.5, 0.5, 0.25], reference_asset_path="minimal.usda",
+        output_path=str(voxels_path),
+    )
+
+    reopened = Usd.Stage.Open(str(voxels_path))
+    instancer = UsdGeom.PointInstancer(reopened.GetPrimAtPath("/IFC_Model/Voxels"))
+    variant_set = instancer.GetPrim().GetVariantSets().GetVariantSet("voxelLOD")
+    assert set(variant_set.GetVariantNames()) == {"size_0_5", "size_0_25"}
+
+
 def test_element_ranges_cover_all_positions_without_overlap(workspace):
     _, _, voxels_path, elements = workspace
     stage = Usd.Stage.Open(str(voxels_path))

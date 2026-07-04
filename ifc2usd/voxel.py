@@ -318,6 +318,12 @@ def build_voxel_stage(
     可能にする。LODサイズごとに `voxelLOD` variantSet の1 variantを対応させ、
     既定 variant は `sizes` の先頭とする。
     """
+    if not sizes:
+        raise ValueError("sizes must be non-empty")
+    # 重複サイズは同じvariant名を再定義し、ボクセル化を無駄に繰り返すだけなので
+    # 順序を保ったまま除去する。
+    unique_sizes = list(dict.fromkeys(sizes))
+
     origin = scene_origin(elements)
 
     stage = Usd.Stage.CreateInMemory()
@@ -338,7 +344,7 @@ def build_voxel_stage(
 
     variant_set = instancer.GetPrim().GetVariantSets().AddVariantSet("voxelLOD")
 
-    for size in sizes:
+    for size in unique_sizes:
         variant_name = _variant_name(size)
         variant_set.AddVariant(variant_name)
         variant_set.SetVariantSelection(variant_name)
@@ -383,7 +389,7 @@ def build_voxel_stage(
             instancer.CreatePrototypesRel().SetTargets(proto_targets)
             instancer.GetPrim().SetCustomDataByKey("elementRanges", ranges)
 
-    variant_set.SetVariantSelection(_variant_name(sizes[0]))
+    variant_set.SetVariantSelection(_variant_name(unique_sizes[0]))
 
     stage.GetRootLayer().Export(str(output_path))
     return str(output_path)
