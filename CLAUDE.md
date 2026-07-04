@@ -56,6 +56,24 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   modifying it). Writes via `Usd.Stage.CreateNew(output_path)` + `GetRootLayer().Save()`, not
   `Stage.Export()`, because `Export()` flattens to the currently-selected variant and would
   discard the other LODs.
+- `sdf.py` — `build_narrow_band_sdf()` builds a sparse signed-distance field from an occupancy
+  voxel grid: dilates the surface voxel set by `band_width` cells (pure-Python 26-neighbor
+  dilation, no scipy dependency) and computes brute-force nearest-surface distance via numpy
+  broadcasting for every candidate. Returns a frozen `NarrowBandSDF` (`values`/`surface_voxels`/
+  `origin`/`size` bundled together so callers can't mismatch `size`/`origin` between build and
+  query). `clearance(point, sdf)` answers an arbitrary world point: O(1) dict lookup inside the
+  band, falling back to a direct (unbounded, always-correct) computation against
+  `surface_voxels` outside it.
+- `sdf_slice.py` — `build_sdf_slices_json()` turns `sdf.py`'s per-element narrow-band SDF into
+  dense 2D horizontal-slice grids (`sdf.values.get((ix, iy, iz))` directly, no `clearance()`
+  fallback call — cells outside the band are `None`/transparent rather than triggering an
+  unbounded per-cell direct computation) for the web viewer to render as a color-mapped overlay
+  plane. A `_MAX_GRID_CELLS` cap skips (with a warning, not silently) any element whose XY
+  footprint at the requested voxel size would produce an oversized grid; a separate
+  `_MAX_SURFACE_VOXELS` cap catches what the footprint cap can't — a tall/thin element (small
+  XY footprint, large Z extent) that would still drive `build_narrow_band_sdf`'s brute-force
+  distance computation (which scales with 3D surface-voxel count, not XY footprint) into
+  excessive memory/CPU.
 - `gltf.py` — USD→glTF(GLB) via trimesh. Walks the USD prim tree from the default prim,
   building a `trimesh.Scene` graph using each prim's own local transform; explodes deduplicated
   mesh points through the face-vertex-index array so per-corner normals line up 1:1. Writes
@@ -63,14 +81,18 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
 - `scene_index.py` — USD→`scene.json` (spec.md §4.1): denormalizes the spatial tree plus
   customData for the web viewer, which never parses USD directly.
 - `serve.py` — `build_serve_directory()` assembles a self-contained static directory (GLB,
-  scene.json, voxels.json when there's voxelizable geometry, vendored `viewer/` assets);
-  `make_server()` returns an unstarted `ThreadingHTTPServer` bound to `127.0.0.1` only, with
-  directory listing disabled.
+  scene.json, voxels.json when there's voxelizable geometry, `<stem>_sdf.json` when
+  `sdf_slices=True`, vendored `viewer/` assets); `make_server()` returns an unstarted
+  `ThreadingHTTPServer` bound to `127.0.0.1` only, with directory listing disabled. Unlike
+  voxels.json, SDF slices are opt-in (`sdf_slices=False` default / CLI `--sdf-slices`): they
+  cost an extra per-element voxelize+narrow-band-SDF pass beyond what voxels.json already does.
 - `viewer/viewer.js` — three.js web viewer (ES modules, no build step; three.js is vendored
   under `viewer/vendor/`, not CDN-loaded). GLB display, OrbitControls camera, hierarchy tree
   with visibility toggles, click-to-select (mesh and voxel, via `Raycaster` + GUID reverse
   lookup) synced bidirectionally with the tree and a property panel, voxel rendering as one
-  `InstancedMesh` per LOD, and a mesh/voxel/both display-mode + LOD switch UI.
+  `InstancedMesh` per LOD, a mesh/voxel/both display-mode + LOD switch UI, and (when
+  `scene.json`'s `assets.sdf` is present) a per-element SDF horizontal-slice overlay toggle +
+  height slider shown only while that element is selected.
 
 ### ifcopenshell 0.8 specifics (breaking vs. the old notebook API)
 
@@ -96,6 +118,12 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   visually but does *not* stop raycasting into its still-`visible=true` children. Click-to-select
   builds its raycast target list explicitly from display-mode state (`currentRaycastTargets()`)
   rather than relying on `.visible` propagation — do the same for any new pickable layer.
+- The SDF slice overlay plane (`updateSdfSliceOverlay` in `viewer.js`) sets `depthTest: false`
+  and a high `renderOrder`: it slices through the interior of the very element it's describing,
+  so with normal depth testing it's invisible, occluded by that element's own opaque mesh/voxel
+  geometry. This is deliberate — it's a diagnostic overlay meant to always be visible on top,
+  not a physically depth-composited object. Any future "cut through this element" overlay should
+  use the same pattern rather than relying on depth testing to make it visible.
 - Morton codes in `voxel.py`/`viewer.js` can be up to 63 bits (spec.md §2, 21 bits/axis). JS's
   native `<<`/`>>`/`&`/`|` truncate to 32-bit signed ints and *wrap the shift amount mod 32*
   rather than saturating — `mortonDecode()` in `viewer.js` uses a fast plain-Number path only
@@ -118,10 +146,15 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
 (Hydra-inspired: author PointInstancer/variant/purpose USD layers for external Hydra viewers,
 plus the self-contained three.js web viewer in `ifc2usd/viewer/`, served by `ifc2usd serve`).
 Sprints 1-4 of the backlog (`docs/viewer/backlog.md`) are implemented: voxelization, glTF
-export, and the full viewer MVP (tree, selection, voxel rendering, display modes). Consult
-`docs/viewer/spec.md` before extending viewer-related features; remaining backlog items
-(section clip plane, broader Playwright regression coverage, Hydra/usdview/Omniverse
-verification, large-model payload streaming) are still open.
+export, and the full viewer MVP (tree, selection, voxel rendering, display modes), plus the
+follow-up items (section clip plane, Playwright regression coverage audit, usdview/Blender/
+Omniverse verification checklists, payload lazy-load measurement). Of Epic E5 (P2/future,
+volume fields and analysis display): E5-1 (narrow-band SDF, `sdf.py`) and a scope-reduced E5-3
+(SDF horizontal-slice overlay, `sdf_slice.py` + `serve --sdf-slices`) are implemented; E5-2
+(UsdVol+OpenVDB output) and full GPU raymarching are blocked on OpenVDB having no
+pip-installable Python bindings in this environment (see the note under Epic E5 in
+`docs/viewer/backlog.md`); E5-4 and Epic E6 are untouched. Consult `docs/viewer/spec.md` before
+extending viewer-related features.
 
 ## Out of scope
 
