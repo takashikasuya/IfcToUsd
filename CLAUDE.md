@@ -16,6 +16,9 @@ uv sync                                   # create .venv and install deps (incl.
 uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.usda
 uv run ifc2usd <ifc> -o <out.usda> --y-up --verbose
 uv run python -m ifc2usd <ifc>            # equivalent module entry point
+uv run ifc2usd voxelize <usda|ifc> --size 1.0 --size 0.5   # -> <base>.json + <base>.usda
+uv run ifc2usd export-gltf <usda> -o <out.glb>
+uv run ifc2usd serve <usda>                                # local web viewer, http://127.0.0.1:8000
 uv run pytest                             # run the end-to-end conversion tests
 uv run python tests/generate_fixture.py   # regenerate tests/fixtures/minimal.ifc
 ```
@@ -33,14 +36,41 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
 (kept for reference) into an order-independent CLI. Data flows in one pass — the notebook's
 `pickle` cross-cell cache was removed.
 
-- `cli.py` — argparse entry point + `convert()`. Reads all geometry into a `geometries` dict
-  keyed by IFC GlobalId, accumulates a `materials` dict, then hands both to the USD writer.
+- `cli.py` — argparse entry point with four subcommands (`convert`/`voxelize`/`export-gltf`/
+  `serve`; bare `ifc2usd <ifc>` is back-compat for `convert`). `convert()` reads all geometry
+  into a `geometries` dict keyed by IFC GlobalId, accumulates a `materials` dict, then hands
+  both to the USD writer.
 - `ifc.py` — IFC extraction via `ifcopenshell.geom`. `get_geometry()` is a generator that
   yields `(verts, indices, norms, info, material_name, diffuse_color, matrix)` per element,
   skipping opening/space/zone elements. `get_properties()` flattens IFC property sets.
 - `usd.py` — USD stage construction. `build_stage()` walks the IFC spatial tree and calls
   `append_prim()` (Xform + optional mesh) for each node; `create_materials()` builds the
-  `/Materials` scope up front so meshes can bind to them.
+  `/Materials` scope up front so meshes can bind to them. `elements_from_stage()` reads a
+  *converted* USD stage back out into `VoxelElement`s (world-space vertices, color, GUID/class)
+  for `voxelize`/`serve` to consume, keyed on the same `GUID`/`class` customData + `mesh` child
+  convention `append_prim()` writes.
+- `voxel.py` — surface/interior voxelization (`voxelize_mesh`, AABB-vs-grid-cell overlap on
+  numpy arrays), self-implemented Morton (Z-order) encode/decode, `build_voxel_json()` (spec.md
+  §2 JSON v2), and `build_voxel_stage()` (spec.md §3 PointInstancer layer — one prototype Cube
+  per element, one `voxelLOD` variant per `--size`, referencing the canonical USD without
+  modifying it). Writes via `Usd.Stage.CreateNew(output_path)` + `GetRootLayer().Save()`, not
+  `Stage.Export()`, because `Export()` flattens to the currently-selected variant and would
+  discard the other LODs.
+- `gltf.py` — USD→glTF(GLB) via trimesh. Walks the USD prim tree from the default prim,
+  building a `trimesh.Scene` graph using each prim's own local transform; explodes deduplicated
+  mesh points through the face-vertex-index array so per-corner normals line up 1:1. Writes
+  `extras.guid`/`class`/`name` on each node (the join key `scene_index.py`/the viewer use).
+- `scene_index.py` — USD→`scene.json` (spec.md §4.1): denormalizes the spatial tree plus
+  customData for the web viewer, which never parses USD directly.
+- `serve.py` — `build_serve_directory()` assembles a self-contained static directory (GLB,
+  scene.json, voxels.json when there's voxelizable geometry, vendored `viewer/` assets);
+  `make_server()` returns an unstarted `ThreadingHTTPServer` bound to `127.0.0.1` only, with
+  directory listing disabled.
+- `viewer/viewer.js` — three.js web viewer (ES modules, no build step; three.js is vendored
+  under `viewer/vendor/`, not CDN-loaded). GLB display, OrbitControls camera, hierarchy tree
+  with visibility toggles, click-to-select (mesh and voxel, via `Raycaster` + GUID reverse
+  lookup) synced bidirectionally with the tree and a property panel, voxel rendering as one
+  `InstancedMesh` per LOD, and a mesh/voxel/both display-mode + LOD switch UI.
 
 ### ifcopenshell 0.8 specifics (breaking vs. the old notebook API)
 
@@ -60,14 +90,28 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   to `faceVarying`; subdivision scheme is forced to `"none"`.
 - Material names are sanitized for USD prim paths via `sanitize_material_name()` (hyphen→`_`,
   other punctuation dropped).
+- **three.js `Raycaster` does not respect ancestor `.visible`** — it only checks each node's
+  own flag when that node's own `raycast()` runs, and a `Group`'s `raycast()` is a no-op. Toggling
+  a parent Group's `.visible` (e.g. `viewer.js`'s `glbRoot`/mesh-vs-voxel display mode) hides it
+  visually but does *not* stop raycasting into its still-`visible=true` children. Click-to-select
+  builds its raycast target list explicitly from display-mode state (`currentRaycastTargets()`)
+  rather than relying on `.visible` propagation — do the same for any new pickable layer.
+- Morton codes in `voxel.py`/`viewer.js` can be up to 63 bits (spec.md §2, 21 bits/axis). JS's
+  native `<<`/`>>`/`&`/`|` truncate to 32-bit signed ints and *wrap the shift amount mod 32*
+  rather than saturating — `mortonDecode()` in `viewer.js` uses a fast plain-Number path only
+  below a threshold where the loop's shifts can't reach 32 (2^30-1, not 2^31-1 — see the comment
+  there for the exact math), falling back to BigInt above it.
 
 ## Planned work
 
 `docs/viewer/` holds the research, architecture, spec, and backlog for a USD + voxel viewer
 (Hydra-inspired: author PointInstancer/variant/purpose USD layers for external Hydra viewers,
-plus a self-contained three.js web viewer served by a future `ifc2usd serve`). Consult it
-before implementing viewer-related features; the voxel JSON v2 schema and CLI subcommand
-layout are specified there.
+plus the self-contained three.js web viewer in `ifc2usd/viewer/`, served by `ifc2usd serve`).
+Sprints 1-4 of the backlog (`docs/viewer/backlog.md`) are implemented: voxelization, glTF
+export, and the full viewer MVP (tree, selection, voxel rendering, display modes). Consult
+`docs/viewer/spec.md` before extending viewer-related features; remaining backlog items
+(section clip plane, broader Playwright regression coverage, Hydra/usdview/Omniverse
+verification, large-model payload streaming) are still open.
 
 ## Out of scope
 
