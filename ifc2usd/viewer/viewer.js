@@ -1,6 +1,6 @@
 // ifc2usd Web ビューワー。
 // scene.json を読み込み、GLBの表示・カメラ操作・階層ツリー・表示切替・
-// ツリー→3Dハイライト同期を行う（3Dクリックでの選択は E3-5 で追加する）。
+// ツリー⇔3D選択同期・ボクセル描画(voxels.json)を行う。
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -165,6 +165,9 @@ function renderPropertyPanel(guid) {
 }
 
 let selectedGuid = null;
+// GLTFLoaderがロードしたメッシュ階層のルート。クリック選択のレイキャスト対象を
+// voxelRoot(ボクセルInstancedMesh)と切り分けるために使う。loadScene()で設定する。
+let glbRoot = null;
 
 function highlightMesh(mesh, on) {
   // gltf.py/usd.py never emit multi-material meshes (one PBRMaterial per mesh),
@@ -200,6 +203,83 @@ function selectByGuid(guid) {
   }
 
   renderPropertyPanel(guid);
+}
+
+// voxels.json のLODごとに1つの THREE.InstancedMesh を割り当てる（1 draw call/LOD、
+// NFR-2）。要素ごとの色は per-instance color として反映する。
+const voxelRoot = new THREE.Group();
+modelRoot.add(voxelRoot);
+const voxelLods = [];
+
+function mortonDecode(code) {
+  // spec.md §2は3軸21bitまで(=最大63bit)のMortonコードを許容するが、JSのビット
+  // 演算子(<<, |, &)は32bit符号付き整数に丸められ、それを超えるビットが破壊される。
+  // ifc2usd/voxel.py の morton_decode と同じアルゴリズムをBigIntで実装し直すことで、
+  // 63bit全域を精度劣化・破壊なく復元できるようにする。
+  let c = BigInt(code);
+  let x = 0n;
+  let y = 0n;
+  let z = 0n;
+  let i = 0n;
+  while (c >> (3n * i) > 0n) {
+    x |= ((c >> (3n * i)) & 1n) << i;
+    y |= ((c >> (3n * i + 1n)) & 1n) << i;
+    z |= ((c >> (3n * i + 2n)) & 1n) << i;
+    i += 1n;
+  }
+  return [Number(x), Number(y), Number(z)];
+}
+
+const _voxelUnitBox = new THREE.BoxGeometry(1, 1, 1);
+
+function buildVoxelLods(voxelDescription) {
+  const origin = voxelDescription.origin;
+  const matrix = new THREE.Matrix4();
+  const color = new THREE.Color();
+
+  for (const lod of voxelDescription.lods) {
+    const size = lod.size;
+    const totalInstances = lod.elements.reduce((sum, el) => sum + el.indices.length, 0);
+
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true });
+    const mesh = new THREE.InstancedMesh(_voxelUnitBox, material, totalInstances);
+    const instanceGuids = new Array(totalInstances);
+
+    let instanceIndex = 0;
+    for (const el of lod.elements) {
+      color.setRGB(el.color[0], el.color[1], el.color[2]);
+      for (const code of el.indices) {
+        const [ix, iy, iz] = mortonDecode(code);
+        matrix.makeScale(size, size, size);
+        matrix.setPosition(
+          origin[0] + (ix + 0.5) * size,
+          origin[1] + (iy + 0.5) * size,
+          origin[2] + (iz + 0.5) * size,
+        );
+        mesh.setMatrixAt(instanceIndex, matrix);
+        mesh.setColorAt(instanceIndex, color);
+        instanceGuids[instanceIndex] = el.guid;
+        instanceIndex++;
+      }
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    // 複数LODは同じ体積を異なる粒度で表現したものなので、既定では先頭
+    // （sizes指定順の1つ目）のみ可視にする。切替UIはE3-7で追加する。
+    mesh.visible = voxelLods.length === 0;
+
+    voxelRoot.add(mesh);
+    voxelLods.push({ size, mesh, instanceGuids });
+  }
+}
+
+async function loadVoxels(voxelsUrl) {
+  const response = await fetch(voxelsUrl);
+  if (!response.ok) {
+    throw new Error(`failed to load voxels: ${response.status}`);
+  }
+  const voxelDescription = await response.json();
+  buildVoxelLods(voxelDescription);
 }
 
 function findGuidOfObject(object) {
@@ -244,7 +324,10 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(pointerNdc, camera);
-  const intersections = raycaster.intersectObjects(modelRoot.children, true);
+  // メッシュ(glTFロード分)のみを対象にする。voxelRootをここに含めると、
+  // 既定で可視のボクセルInstancedMeshが手前に交差してメッシュ選択を妨げてしまう
+  // （ボクセルクリックからのGUID逆引きはIssue #16で別途扱う）。
+  const intersections = glbRoot ? raycaster.intersectObjects([glbRoot], true) : [];
   if (intersections.length === 0) return;
 
   const guid = findGuidOfObject(intersections[0].object);
@@ -301,6 +384,7 @@ async function loadScene() {
   const loader = new GLTFLoader();
   const gltf = await loader.loadAsync(sceneDescription.assets.gltf);
   modelRoot.add(gltf.scene);
+  glbRoot = gltf.scene;
 
   modelBoundingBox = new THREE.Box3().setFromObject(modelRoot);
   fitAll();
@@ -308,6 +392,10 @@ async function loadScene() {
   buildObjectsByGuid();
   buildNodesByGuid(sceneDescription.tree);
   renderTree(sceneDescription.tree);
+
+  if (sceneDescription.assets.voxels) {
+    await loadVoxels(sceneDescription.assets.voxels);
+  }
 
   return sceneDescription;
 }
@@ -332,6 +420,7 @@ window.ifc2usdViewer = {
   getBoundingBoxOfGuid,
   selectByGuid,
   getSelectedGuid: () => selectedGuid,
+  voxelLods,
 };
 
 resize();
