@@ -1,12 +1,15 @@
 // ifc2usd Web ビューワー。
-// scene.json を読み込み、GLBの表示・カメラ操作を行う（階層ツリー・選択は
-// E3-4/E3-5 で追加する）。
+// scene.json を読み込み、GLBの表示・カメラ操作・階層ツリー・表示切替・
+// ツリー→3Dハイライト同期を行う（3Dクリックでの選択は E3-5 で追加する）。
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const viewport = document.getElementById("viewport");
+const treePanel = document.getElementById("tree-panel");
+
+const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x202020);
@@ -93,6 +96,103 @@ function updateClipPlanes() {
   camera.updateProjectionMatrix();
 }
 
+// guid -> THREE.Object3D。GLTFLoaderがglTFノードのextrasを
+// object.userData へ直接展開するため、userData.guid で引ける
+// （gltf.py が各ノードに書き込む extras.guid が結合キー、spec.md §4.1）。
+const objectsByGuid = new Map();
+
+function buildObjectsByGuid() {
+  objectsByGuid.clear();
+  modelRoot.traverse((obj) => {
+    if (obj.userData && obj.userData.guid) {
+      objectsByGuid.set(obj.userData.guid, obj);
+    }
+  });
+}
+
+function setObjectVisible(guid, visible) {
+  const obj = objectsByGuid.get(guid);
+  if (obj) obj.visible = visible;
+}
+
+function forEachMeshOf(guid, callback) {
+  const obj = objectsByGuid.get(guid);
+  if (!obj) return;
+  obj.traverse((child) => {
+    if (child.isMesh && child.material) callback(child);
+  });
+}
+
+let selectedGuid = null;
+
+function highlightMesh(mesh, on) {
+  if (!mesh.material.emissive) return;
+  if (on) {
+    if (mesh.userData.__originalEmissive === undefined) {
+      mesh.userData.__originalEmissive = mesh.material.emissive.getHex();
+    }
+    mesh.material.emissive.setHex(HIGHLIGHT_EMISSIVE);
+  } else if (mesh.userData.__originalEmissive !== undefined) {
+    mesh.material.emissive.setHex(mesh.userData.__originalEmissive);
+  }
+}
+
+function selectByGuid(guid) {
+  if (selectedGuid === guid) return;
+
+  if (selectedGuid !== null) {
+    forEachMeshOf(selectedGuid, (mesh) => highlightMesh(mesh, false));
+    const prevLi = treePanel.querySelector(`li[data-guid="${selectedGuid}"]`);
+    if (prevLi) prevLi.classList.remove("selected");
+  }
+
+  selectedGuid = guid;
+
+  if (guid !== null) {
+    forEachMeshOf(guid, (mesh) => highlightMesh(mesh, true));
+    const li = treePanel.querySelector(`li[data-guid="${guid}"]`);
+    if (li) li.classList.add("selected");
+  }
+}
+
+function renderTreeNode(node) {
+  const li = document.createElement("li");
+  li.dataset.guid = node.guid;
+
+  const visibility = document.createElement("input");
+  visibility.type = "checkbox";
+  visibility.className = "tree-visibility";
+  visibility.checked = true;
+  visibility.addEventListener("change", () => setObjectVisible(node.guid, visibility.checked));
+  li.appendChild(visibility);
+
+  const label = document.createElement("span");
+  label.className = "tree-label";
+  label.textContent = node.name ? `${node.name} (${node.class})` : node.class;
+  label.addEventListener("click", () => selectByGuid(node.guid));
+  li.appendChild(label);
+
+  if (node.children && node.children.length > 0) {
+    const ul = document.createElement("ul");
+    for (const child of node.children) {
+      ul.appendChild(renderTreeNode(child));
+    }
+    li.appendChild(ul);
+  }
+
+  return li;
+}
+
+function renderTree(tree) {
+  treePanel.innerHTML = "";
+  const ul = document.createElement("ul");
+  ul.className = "tree-root";
+  for (const node of tree) {
+    ul.appendChild(renderTreeNode(node));
+  }
+  treePanel.appendChild(ul);
+}
+
 async function loadScene() {
   const response = await fetch("./scene.json");
   if (!response.ok) {
@@ -109,6 +209,9 @@ async function loadScene() {
   modelBoundingBox = new THREE.Box3().setFromObject(modelRoot);
   fitAll();
 
+  buildObjectsByGuid();
+  renderTree(sceneDescription.tree);
+
   return sceneDescription;
 }
 
@@ -119,7 +222,7 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-// Playwright/E2Eテスト、および後続issue（E3-4/E3-5）が使うフック。
+// Playwright/E2Eテスト、および後続issue（E3-5）が使うフック。
 window.ifc2usdViewer = {
   scene,
   camera,
@@ -129,6 +232,8 @@ window.ifc2usdViewer = {
   fitCameraToBox,
   fitAll,
   getBoundingBox: () => modelBoundingBox,
+  selectByGuid,
+  getSelectedGuid: () => selectedGuid,
 };
 
 resize();
