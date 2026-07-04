@@ -101,6 +101,16 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   rather than saturating — `mortonDecode()` in `viewer.js` uses a fast plain-Number path only
   below a threshold where the loop's shifts can't reach 32 (2^30-1, not 2^31-1 — see the comment
   there for the exact math), falling back to BigInt above it.
+- `gltf.py`'s `_mesh_material_properties()` must read `metallic`/`roughness` off the bound
+  `UsdPreviewSurface` shader (falling back to `0.0`/`1.0`, matching `usd.py`'s own defaults) and
+  pass them through as `metallicFactor`/`roughnessFactor` on the exported `PBRMaterial` — never
+  omit them. glTF's spec default when they're absent is `1.0`/`1.0` (fully metallic), and a
+  metallic material has no diffuse reflectance; without an environment map (this viewer has
+  none) it renders essentially black under plain directional/hemisphere light regardless of a
+  correct `baseColorFactor`. This was a real, previously-undetected bug (every element rendered
+  near-black) caught only once a Playwright test started sampling actual rendered pixel colors
+  instead of just checking exported glTF JSON or USD data — checking data correctness is not
+  the same as checking it actually reaches the screen looking right.
 
 ## Planned work
 

@@ -1,7 +1,8 @@
 """Web ビューワー（viewer.js）のE2Eテスト。
 
 `ifc2usd serve` 相当の静的配信を実際に起動し、Playwright（Chromium）で
-GLB表示・カメラ操作（orbit/pan/zoom/全体フィット）・Z-UP吸収を検証する。
+GLB表示（レンダリング結果の色相を含む）・カメラ操作（orbit/pan/zoom/全体フィット）・
+Z-UP吸収を検証する。
 """
 
 from __future__ import annotations
@@ -58,9 +59,76 @@ def page(browser):
 def _wait_for_load(page, url):
     console_errors = []
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
-    page.goto(url)
+    # ?e2e: preserveDrawingBuffer(canvasのdrawImage/getImageDataによる画素読み取りに
+    # 必要)を有効化する（viewer.jsのisE2ETest参照、既定offで実ユーザーへの
+    # 常時コストを避けている）。
+    page.goto(f"{url}?e2e")
     page.wait_for_function("window.ifc2usdLoaded === true", timeout=10000)
     return console_errors
+
+
+_CANDIDATE_VIEW_DIRECTIONS = [
+    (5, 10, 7),  # DirectionalLightと同じ向き
+    (1, 1, 1),
+    (1, 1, -1),
+    (1, -1, 1),
+    (-1, 1, 1),
+    (1, 0, 0),
+    (0, 1, 0),
+    (0, 0, 1),
+    (-1, -1, -1),
+    (0, 1, 1),
+]
+
+
+def _sample_pixel_at_guid(page, guid):
+    """指定GUIDのオブジェクトの周囲を複数方向から見て、最も彩度の高い
+    （R/G/Bの最大差が最も大きい）画素色を返す（[r, g, b]、各0-255）。
+
+    壁は薄い箱形状で面ごとに法線が異なり、単一方向からのフィットだと
+    たまたま照明から見て逆光/自己遮蔽側の面しか見えず、マテリアル色は
+    正しくてもほぼ黒くレンダリングされることがある（実際に本テスト作成時、
+    (1,1,1)方向でこれを踏んだ）。複数方向を試し、最も色の乗った画素を
+    採用することで、特定の面の向きに依存しない安定した検証にする。
+
+    既定の表示モードは"both"でメッシュとボクセルが重なって表示されるが、
+    ボクセルは別コードパス(viewer.jsのbuildVoxelLods)でmetalness=0の
+    THREE.MeshStandardMaterialを直接構築しており、このテストが検証したい
+    gltf.py側のmetallic/roughness欠落バグの影響を受けない。既定モードのまま
+    だと、メッシュが仮に黒くレンダリングされてもボクセルの正しい色でピクセルが
+    上書きされ検証をすり抜けてしまうため、メッシュのみを対象にする。"""
+    page.evaluate('window.ifc2usdViewer.setDisplayMode("mesh")')
+    best = (32, 32, 32)  # 背景色（何も当たらなかった場合のフォールバック）
+    best_saturation = -1
+    for dx, dy, dz in _CANDIDATE_VIEW_DIRECTIONS:
+        page.evaluate(f"""
+            () => {{
+                window.ifc2usdViewer.camera.position.set({dx}, {dy}, {dz});
+                window.ifc2usdViewer.controls.target.set(0, 0, 0);
+                const box = window.ifc2usdViewer.getBoundingBoxOfGuid("{guid}");
+                window.ifc2usdViewer.fitCameraToBox(box, {{ paddingFactor: 1.5 }});
+            }}
+        """)
+        page.wait_for_timeout(100)
+        r, g, b = page.evaluate("""
+            () => {
+                const canvas = document.querySelector('#viewport canvas');
+                const tmp = document.createElement('canvas');
+                tmp.width = canvas.width;
+                tmp.height = canvas.height;
+                const ctx = tmp.getContext('2d');
+                ctx.drawImage(canvas, 0, 0);
+                const x = Math.floor(tmp.width / 2);
+                const y = Math.floor(tmp.height / 2);
+                const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
+                return [r, g, b];
+            }
+        """)
+        saturation = max(r, g, b) - min(r, g, b)
+        if saturation > best_saturation:
+            best_saturation = saturation
+            best = (r, g, b)
+    return best
 
 
 def test_page_loads_without_console_errors(page, served_url):
@@ -146,6 +214,66 @@ def test_zoom_wheel_changes_camera_distance(page, served_url):
 
     after = distance_to_target()
     assert after < before
+
+
+def test_pan_drag_moves_camera_and_target(page, served_url):
+    """OrbitControlsの既定設定では右ドラッグがpan（orbitとは異なりtargetごと
+    平行移動する）。左ドラッグ(orbit)はtargetを動かさずカメラだけ回転させるため、
+    「targetが動く」ことがpan固有の検証点になる。"""
+    _wait_for_load(page, served_url)
+    before_target = page.evaluate("window.ifc2usdViewer.controls.target.toArray()")
+
+    canvas_box = page.eval_on_selector(
+        "#viewport canvas",
+        "el => { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y, w: r.width, h: r.height}; }",
+    )
+    cx = canvas_box["x"] + canvas_box["w"] / 2
+    cy = canvas_box["y"] + canvas_box["h"] / 2
+
+    page.mouse.move(cx, cy)
+    page.mouse.down(button="right")
+    page.mouse.move(cx + 100, cy + 50, steps=10)
+    page.mouse.up(button="right")
+    page.wait_for_timeout(200)
+
+    after_target = page.evaluate("window.ifc2usdViewer.controls.target.toArray()")
+    moved = any(abs(a - b) > 1e-3 for a, b in zip(before_target, after_target))
+    assert moved
+
+
+def test_wall_colors_render_with_correct_hue(page, served_url):
+    """FR-1(PBR/displayColorフォールバック)は、GLBのマテリアルデータが正しいこと
+    (tests/test_gltf.pyでPython側から検証済み)とは別に、実際にブラウザで
+    ロード・レンダリングされたピクセルが期待した色相になっていることも
+    確認する必要がある（GLTFLoaderや three.jsのライティング適用に問題があれば
+    データが正しくても画面には反映されない可能性があるため）。"""
+    _wait_for_load(page, served_url)
+
+    # tests/test_convert.py の _EXPECTED_WALLS と同じ既知の色（フィクスチャ生成時に設定）。
+    north_guid = page.evaluate("""
+        () => {
+            let found = null;
+            window.ifc2usdViewer.modelRoot.traverse((obj) => {
+                if (obj.userData && obj.userData.name === 'Wall North') found = obj.userData.guid;
+            });
+            return found;
+        }
+    """)
+    east_guid = page.evaluate("""
+        () => {
+            let found = null;
+            window.ifc2usdViewer.modelRoot.traverse((obj) => {
+                if (obj.userData && obj.userData.name === 'Wall East') found = obj.userData.guid;
+            });
+            return found;
+        }
+    """)
+
+    r, g, b = _sample_pixel_at_guid(page, north_guid)
+    assert r > g and r > b, f"Wall North (赤系, RGB=(0.8,0.2,0.2)) expected reddish, got ({r},{g},{b})"
+
+    r, g, b = _sample_pixel_at_guid(page, east_guid)
+    assert b > r and b > g, f"Wall East (青系, RGB=(0.2,0.5,0.8)) expected bluish, got ({r},{g},{b})"
 
 
 def test_z_up_data_is_reoriented_for_three_js_y_up(page, served_url):

@@ -16,6 +16,9 @@ from pxr import Usd, UsdGeom, UsdShade
 from .usd import MESH_PRIM_NAME
 
 _DEFAULT_COLOR = (0.5, 0.5, 0.5)
+# usd.py の create_materials が実際に設定する既定値と揃える（非金属・完全拡散反射）。
+_DEFAULT_METALLIC = 0.0
+_DEFAULT_ROUGHNESS = 1.0
 
 
 def _local_matrix(prim: Usd.Prim) -> np.ndarray:
@@ -49,16 +52,25 @@ def _mesh_display_color(mesh: UsdGeom.Mesh) -> tuple[float, float, float]:
     return _DEFAULT_COLOR
 
 
-def _mesh_color_and_opacity(mesh: UsdGeom.Mesh, stage: Usd.Stage) -> tuple[float, float, float, float]:
-    """バインドされたマテリアルの diffuseColor/opacity を返す。
+def _mesh_material_properties(
+    mesh: UsdGeom.Mesh, stage: Usd.Stage
+) -> tuple[float, float, float, float, float, float]:
+    """バインドされたマテリアルの diffuseColor/opacity/metallic/roughness を返す。
 
     マテリアル未バインドの場合は、usd.py の create_mesh が常に設定する
-    displayColor にフォールバックする（灰色決め打ちにはしない）。
+    displayColor にフォールバックする（灰色決め打ちにはしない）。metallic/roughness
+    も usd.py の create_materials と同じ既定値(0.0/1.0、非金属)にフォールバックする
+    ——これを省略してglTFの pbrMetallicRoughness に metallicFactor/roughnessFactor
+    を書かないと、glTF仕様の既定値(いずれも1.0=完全な金属)が採用されてしまう。
+    金属は環境マップ由来の鏡面反射でしか光らないため、環境マップの無いこの
+    ビューワーのシンプルな指向性/半球照明下では、baseColorFactorが正しくても
+    ほぼ真っ黒に描画される（Issue #19のE2Eテストで実際に発見したレンダリング
+    バグ）。
     """
     mat_path = UsdShade.MaterialBindingAPI(mesh).GetDirectBinding().GetMaterialPath()
     if not mat_path:
         r, g, b = _mesh_display_color(mesh)
-        return (r, g, b, 1.0)
+        return (r, g, b, 1.0, _DEFAULT_METALLIC, _DEFAULT_ROUGHNESS)
 
     shader = UsdShade.Shader(stage.GetPrimAtPath(mat_path.AppendChild("PBRShader")))
     diffuse = shader.GetInput("diffuseColor").Get()
@@ -70,7 +82,16 @@ def _mesh_color_and_opacity(mesh: UsdGeom.Mesh, stage: Usd.Stage) -> tuple[float
     opacity_input = shader.GetInput("opacity")
     opacity = opacity_input.Get() if opacity_input else None
     alpha = float(opacity) if opacity is not None else 1.0
-    return (r, g, b, alpha)
+
+    metallic_input = shader.GetInput("metallic")
+    metallic_value = metallic_input.Get() if metallic_input else None
+    metallic = float(metallic_value) if metallic_value is not None else _DEFAULT_METALLIC
+
+    roughness_input = shader.GetInput("roughness")
+    roughness_value = roughness_input.Get() if roughness_input else None
+    roughness = float(roughness_value) if roughness_value is not None else _DEFAULT_ROUGHNESS
+
+    return (r, g, b, alpha, metallic, roughness)
 
 
 def _mesh_to_trimesh(mesh_prim: Usd.Prim, stage: Usd.Stage) -> trimesh.Trimesh:
@@ -91,9 +112,11 @@ def _mesh_to_trimesh(mesh_prim: Usd.Prim, stage: Usd.Stage) -> trimesh.Trimesh:
     if normals and len(normals) == len(exploded_vertices):
         tri_mesh.vertex_normals = np.array([(n[0], n[1], n[2]) for n in normals], dtype=np.float64)
 
-    r, g, b, alpha = _mesh_color_and_opacity(mesh, stage)
+    r, g, b, alpha, metallic, roughness = _mesh_material_properties(mesh, stage)
     pbr = trimesh.visual.material.PBRMaterial(
         baseColorFactor=[r, g, b, alpha],
+        metallicFactor=metallic,
+        roughnessFactor=roughness,
         alphaMode="BLEND" if alpha < 1.0 else "OPAQUE",
     )
     tri_mesh.visual = trimesh.visual.TextureVisuals(material=pbr)
