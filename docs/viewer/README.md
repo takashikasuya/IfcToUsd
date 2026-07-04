@@ -9,6 +9,8 @@ USD（`ifc2usd` の出力）と、本リポジトリのボクセル表現（`GLT
 | [architecture.md](architecture.md) | アーキテクチャ: Hydra に倣った層分離、2系統の表示経路（USDネイティブ / Web）、全体図 |
 | [spec.md](spec.md) | 仕様: CLI、ボクセル JSON v2 スキーマ、USD オーサリング規約、ビューワー機能要件・非機能要件 |
 | [backlog.md](backlog.md) | バックログ: エピック / ストーリー、優先度、受け入れ条件 |
+| [usdview-checklist.md](usdview-checklist.md) | usdview（prebuiltバイナリ）でのvoxelLOD variant/purpose切替の動作確認チェックリスト |
+| [blender-omniverse-checklist.md](blender-omniverse-checklist.md) | Blender/Omniverseでの読み込み確認・usdviewとの表示差異記録チェックリスト |
 
 ## 結論の要約
 
