@@ -4,3 +4,10 @@ files/*
 output/*
 pymorton.py
 __pycache__/*
+
+# Python / uv
+.venv/
+*.egg-info/
+build/
+dist/
+*.pyc
