@@ -151,6 +151,87 @@ def test_highlighting_one_element_does_not_affect_other_elements(page, served_ur
         assert c == pytest.approx(element_colors[wall_east], abs=1e-4)
 
 
+def test_highlight_color_matches_expected_lerp_toward_highlight_hue(page, served_url):
+    """コードレビュー指摘: 「変化したこと」だけでなく「正しい値に変化したこと」を
+    検証する（色/ブレンド率の取り違えを拾えるように）。期待値はviewer.js自身の
+    実装詳細（ハイライト色0x3355ff、lerp率0.6）を、three.jsを別途動的import
+    して独立に計算する——アプリのランタイム状態を再利用せず、素のColor数学
+    として同じ計算を再現するだけなので、テストが実装を追認するだけにはならない。"""
+    _wait_for_load(page, served_url)
+
+    voxels = page.evaluate("""
+        () => fetch(window.ifc2usdViewer.sceneDescription.assets.voxels).then(r => r.json())
+    """)
+    element_colors = {el["guid"]: el["color"] for el in voxels["lods"][0]["elements"]}
+
+    wall_guid = _guid_by_name(page, "Wall North")
+    original_color = element_colors[wall_guid]
+
+    page.evaluate("(guid) => window.ifc2usdViewer.selectByGuid(guid)", wall_guid)
+    actual = _instance_colors_for_guid(page, wall_guid)[0]
+
+    expected = page.evaluate("""
+        async (original) => {
+            const THREE = await import('/vendor/three.module.min.js');
+            const base = new THREE.Color(original[0], original[1], original[2]);
+            const highlight = new THREE.Color(0x3355ff);
+            return base.lerp(highlight, 0.6).toArray();
+        }
+    """, original_color)
+
+    assert actual == pytest.approx(expected, abs=1e-4)
+
+
+def test_highlight_applies_across_all_voxel_lods(page, browser, tmp_path):
+    """コードレビュー指摘: 出荷済みテストは全てLOD1つ(既定のvoxel_sizes)しか
+    検証しておらず、「全LODに対してハイライトが適用される」という実装の中で
+    最も見落としやすい挙動がテスト対象外だった。複数LODでserveし、
+    アクティブでない側のLODにもハイライトが及ぶことを確認する。"""
+    usda = tmp_path / "minimal.usda"
+    convert(FIXTURE, usda)
+    workdir = tmp_path / "www_multi_lod"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir, voxel_sizes=(0.5, 1.0))
+
+    server = make_server(workdir, port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        page = browser.new_page(viewport={"width": 1000, "height": 700})
+        _wait_for_load(page, f"http://127.0.0.1:{port}/")
+
+        lod_count = page.evaluate("window.ifc2usdViewer.voxelLods.length")
+        assert lod_count == 2
+
+        voxels = page.evaluate("""
+            () => fetch(window.ifc2usdViewer.sceneDescription.assets.voxels).then(r => r.json())
+        """)
+        element_colors = {el["guid"]: el["color"] for el in voxels["lods"][0]["elements"]}
+
+        wall_guid = _guid_by_name(page, "Wall North")
+        original_color = element_colors[wall_guid]
+
+        for lod_index in (0, 1):
+            before = _instance_colors_for_guid(page, wall_guid, lod_index=lod_index)
+            assert len(before) > 0
+            for c in before:
+                assert c == pytest.approx(original_color, abs=1e-4)
+
+        page.evaluate("(guid) => window.ifc2usdViewer.selectByGuid(guid)", wall_guid)
+
+        for lod_index in (0, 1):
+            after = _instance_colors_for_guid(page, wall_guid, lod_index=lod_index)
+            assert len(after) > 0
+            for c in after:
+                assert c != pytest.approx(original_color, abs=1e-4)
+
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 # CLAUDE.mdの教訓（データが正しいことと画面に出ることは別）に従い、当初は
 # 画素レベルのスクリーンショット比較（highlight前後でcanvas全体のバイト列が
 # 変わること）も書いていたが、その過程で本Issueとは別の既存バグを発見した:
