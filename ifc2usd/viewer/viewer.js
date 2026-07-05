@@ -13,6 +13,7 @@ const voxelLodSelect = document.getElementById("voxel-lod-select");
 const sectionHeightSlider = document.getElementById("section-height-slider");
 const sdfSliceToggle = document.getElementById("sdf-slice-toggle");
 const sdfSliceHeightSlider = document.getElementById("sdf-slice-height-slider");
+const wireframeToggle = document.getElementById("wireframe-toggle");
 
 const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
@@ -479,7 +480,7 @@ function buildVoxelLods(voxelDescription) {
     const size = lod.size;
     const totalInstances = lod.elements.reduce((sum, el) => sum + el.indices.length, 0);
 
-    const material = new THREE.MeshStandardMaterial({ vertexColors: true });
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, wireframe: wireframeEnabled });
     const mesh = new THREE.InstancedMesh(_voxelUnitBox, material, totalInstances);
     const instanceGuids = new Array(totalInstances);
 
@@ -572,6 +573,26 @@ for (const input of document.querySelectorAll('input[name="display-mode"]')) {
 voxelLodSelect.addEventListener("change", () => {
   setActiveVoxelLodIndex(Number(voxelLodSelect.value));
 });
+
+// ワイヤフレーム表示。表示モード(mesh/voxel/both)とは直交する切替で、
+// メッシュ・ボクセルの両マテリアルへ同時に効かせる。非表示のLOD/glbRootにも
+// 適用しておく(表示モード切替時に改めて設定し直す必要が無いよう、材質側の
+// 状態として持たせる)。
+let wireframeEnabled = wireframeToggle.checked;
+
+function setWireframeEnabled(enabled) {
+  wireframeEnabled = enabled;
+  if (glbRoot) {
+    glbRoot.traverse((child) => {
+      if (child.isMesh && child.material) child.material.wireframe = enabled;
+    });
+  }
+  for (const lod of voxelLods) {
+    lod.mesh.material.wireframe = enabled;
+  }
+}
+
+wireframeToggle.addEventListener("change", () => setWireframeEnabled(wireframeToggle.checked));
 
 async function loadVoxels(voxelsUrl) {
   const response = await fetch(voxelsUrl);
@@ -724,6 +745,7 @@ async function loadScene() {
   modelRoot.add(gltf.scene);
   glbRoot = gltf.scene;
   applyDisplayState();
+  if (wireframeEnabled) setWireframeEnabled(true);
 
   modelBoundingBox = new THREE.Box3().setFromObject(modelRoot);
   fitAll();
