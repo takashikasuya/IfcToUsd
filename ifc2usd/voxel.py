@@ -10,7 +10,6 @@ Morton符号化はビット桁のインタリーブによる自前実装。
 from __future__ import annotations
 
 import logging
-import math
 from typing import NamedTuple, Optional, Sequence
 
 import numpy as np
@@ -69,6 +68,17 @@ def _snap_to_integer(value: np.ndarray, tol: float = 1e-9) -> np.ndarray:
     return np.where(np.abs(value - rounded) < tol, rounded, value)
 
 
+def _isclose(a: np.ndarray, b: np.ndarray, tol: float = 1e-9) -> np.ndarray:
+    """`math.isclose(a, b, rel_tol=tol, abs_tol=tol)` と等価な判定をnumpy配列上で行う。
+
+    `np.isclose`は既定許容誤差（`rtol=1e-5, atol=1e-8`）も比較の非対称性（`abs(b)`のみ
+    参照）も`math.isclose`と異なるため、素朴に置き換えると挙動が変わってしまう。
+    ここでは`math.isclose`の定義式（`abs(a-b) <= max(rel_tol*max(|a|,|b|), abs_tol)`）を
+    そのままベクトル化する。
+    """
+    return np.abs(a - b) <= np.maximum(tol * np.maximum(np.abs(a), np.abs(b)), tol)
+
+
 def _surface_voxels(
     vertices: np.ndarray, triangles: np.ndarray, size: float, origin: np.ndarray
 ) -> set[tuple[int, int, int]]:
@@ -91,41 +101,59 @@ def _surface_voxels(
 
     呼び出し側（voxelize_mesh）で `origin` がメッシュのAABB最小点以下である
     ことを検証済みのため、ここでは格子インデックスが負にならない前提で計算する。
+
+    三角形ごとのAABB計算・退化面解決はnumpyで全三角形をまとめてベクトル化し、
+    ボクセルセルへの展開（三角形ごとに箱の大きさが異なるため完全にはベクトル化
+    できない）だけを三角形単位のループ（`np.meshgrid`によるベクトル化済みの
+    展開）で行う（Issue #35/E7-1、旧・素朴な三重Pythonループとの等価性は
+    ランダム化した差分テストで検証済み）。
     """
+    if len(triangles) == 0:
+        return set()
+
     mesh_min = vertices.min(axis=0)
     mesh_max = vertices.max(axis=0)
-    tol = 1e-9
 
+    tri_verts = vertices[triangles]  # (T, 3, 3)
+    tri_min = tri_verts.min(axis=1)  # (T, 3)
+    tri_max = tri_verts.max(axis=1)  # (T, 3)
+
+    lo_raw = _snap_to_integer((tri_min - origin) / size)
+    hi_raw = _snap_to_integer((tri_max - origin) / size)
+    lo = np.floor(lo_raw).astype(np.int64)
+    hi = (np.ceil(hi_raw) - 1).astype(np.int64)
+
+    degenerate = hi < lo  # (T, 3) 軸ごとの退化フラグ
+    if np.any(degenerate):
+        k = lo.copy()  # 格子線の整数位置（degenerate点 = k*size）。以降のnp.whereは
+        # 新しい配列を返すだけでlo/hiをその場変更しないため、kはこの時点の値を保つ。
+        at_mesh_min = degenerate & _isclose(tri_min, mesh_min)
+        at_mesh_max = degenerate & _isclose(tri_min, mesh_max) & ~at_mesh_min
+        interior = degenerate & ~at_mesh_min & ~at_mesh_max
+
+        lo = np.where(at_mesh_min, k, lo)
+        hi = np.where(at_mesh_min, k, hi)
+        lo = np.where(at_mesh_max, k - 1, lo)
+        hi = np.where(at_mesh_max, k - 1, hi)
+        lo = np.where(interior, np.maximum(k - 1, 0), lo)
+        hi = np.where(interior, k, hi)
+
+    lo = np.maximum(lo, 0)
+    valid = ~np.any(hi < lo, axis=1)
+
+    # 三角形ごとに箱の大きさが異なるため、セル展開自体は三角形単位のループになる。
+    # ただし展開そのもの(np.meshgrid)と最終的な重複排除(Pythonのset)はそれぞれ
+    # ベクトル化・高速なデータ構造に任せる。集合への追加は
+    # `set.update(zip(gx.tolist(), gy.tolist(), gz.tolist()))`の形にすること
+    # （`np.stack(...).tolist()`のような2次元配列への`.tolist()`は、同じ要素数でも
+    # 軸ごとに`.tolist()`してzipするより明確に遅いことをベンチマークで確認済み）。
     voxels: set[tuple[int, int, int]] = set()
-    for tri in triangles:
-        tri_verts = vertices[tri]
-        tri_min = tri_verts.min(axis=0)
-        tri_max = tri_verts.max(axis=0)
-        lo_raw = _snap_to_integer((tri_min - origin) / size)
-        hi_raw = _snap_to_integer((tri_max - origin) / size)
-        lo = np.floor(lo_raw).astype(int)
-        hi = (np.ceil(hi_raw) - 1).astype(int)
-
-        for axis in range(3):
-            if hi[axis] >= lo[axis]:
-                continue
-            k = lo[axis]  # 格子線の整数位置（degenerate点 = k*size）
-            value = tri_min[axis]
-            if math.isclose(value, mesh_min[axis], abs_tol=tol):
-                lo[axis] = hi[axis] = k
-            elif math.isclose(value, mesh_max[axis], abs_tol=tol):
-                lo[axis] = hi[axis] = k - 1
-            else:
-                lo[axis] = max(k - 1, 0)
-                hi[axis] = k
-
-        lo = np.maximum(lo, 0)
-        if np.any(hi < lo):
-            continue
-        for ix in range(lo[0], hi[0] + 1):
-            for iy in range(lo[1], hi[1] + 1):
-                for iz in range(lo[2], hi[2] + 1):
-                    voxels.add((ix, iy, iz))
+    for i in np.nonzero(valid)[0]:
+        xs = np.arange(lo[i, 0], hi[i, 0] + 1)
+        ys = np.arange(lo[i, 1], hi[i, 1] + 1)
+        zs = np.arange(lo[i, 2], hi[i, 2] + 1)
+        gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
+        voxels.update(zip(gx.ravel().tolist(), gy.ravel().tolist(), gz.ravel().tolist()))
     return voxels
 
 
