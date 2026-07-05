@@ -229,6 +229,32 @@ function highlightMesh(mesh, on) {
   }
 }
 
+// forEachMeshOf/highlightMeshはGLTFLoaderのメッシュ階層(objectsByGuid)にしか作用しない。
+// ボクセル専用表示モード(メッシュ非表示)では、そちらをemissiveで光らせても画面に
+// 何も見えないため、選択状態を示せない(Issue #37)。InstancedMeshは要素単位の
+// 個別Object3Dを持たないため、per-instance色(instanceColor)を選択中のインスタンス
+// だけ一時的に書き換えることでハイライトを表現する。
+const _voxelHighlightColor = new THREE.Color(HIGHLIGHT_EMISSIVE);
+const _voxelHighlightScratch = new THREE.Color();
+
+function highlightVoxelInstancesOfGuid(guid, on) {
+  for (const lod of voxelLods) {
+    const indices = lod.instanceIndicesByGuid.get(guid);
+    if (!indices || !lod.originalColors) continue;
+
+    for (const i of indices) {
+      _voxelHighlightScratch.fromArray(lod.originalColors, i * 3);
+      if (on) {
+        // 元の要素色を保ったまま識別できるよう、ハイライト色へ寄せるだけで
+        // 完全には置き換えない（element色そのものが手がかりの一部のため）。
+        _voxelHighlightScratch.lerp(_voxelHighlightColor, 0.6);
+      }
+      lod.mesh.setColorAt(i, _voxelHighlightScratch);
+    }
+    lod.mesh.instanceColor.needsUpdate = true;
+  }
+}
+
 function selectByGuid(guid) {
   // Re-clicking the already-selected node is a no-op by design: this issue's
   // scope is one-directional tree -> 3D sync, not a deselect/toggle affordance.
@@ -236,6 +262,7 @@ function selectByGuid(guid) {
 
   if (selectedGuid !== null) {
     forEachMeshOf(selectedGuid, (mesh) => highlightMesh(mesh, false));
+    highlightVoxelInstancesOfGuid(selectedGuid, false);
     const prevLi = treePanel.querySelector(`li[data-guid="${selectedGuid}"]`);
     if (prevLi) prevLi.classList.remove("selected");
   }
@@ -244,6 +271,7 @@ function selectByGuid(guid) {
 
   if (guid !== null) {
     forEachMeshOf(guid, (mesh) => highlightMesh(mesh, true));
+    highlightVoxelInstancesOfGuid(guid, true);
     const li = treePanel.querySelector(`li[data-guid="${guid}"]`);
     if (li) li.classList.add("selected");
   }
@@ -478,8 +506,27 @@ function buildVoxelLods(voxelDescription) {
     // 一元化する（表示モード/アクティブLODの決定ロジックを1箇所にまとめるため）。
     mesh.visible = false;
 
+    // 選択ハイライト(highlightVoxelInstancesOfGuid)が変更前の色へ復元できるよう、
+    // 元のper-instance色をここでコピーして保持しておく（instanceColor.array自体は
+    // ハイライト表示中に上書きされるため、生きた参照ではなく複製が必要）。
+    const originalColors = mesh.instanceColor ? mesh.instanceColor.array.slice() : null;
+
+    // guid -> そのguidが占めるinstance索引の配列。ハイライト時に全instanceGuidsを
+    // 線形走査せずに済むよう、構築時に一度だけ索引化しておく
+    // （objectsByGuid/nodesByGuidと同じ「guidキーのMapを1箇所で持つ」パターン）。
+    const instanceIndicesByGuid = new Map();
+    for (let i = 0; i < instanceGuids.length; i++) {
+      const g = instanceGuids[i];
+      let list = instanceIndicesByGuid.get(g);
+      if (!list) {
+        list = [];
+        instanceIndicesByGuid.set(g, list);
+      }
+      list.push(i);
+    }
+
     voxelRoot.add(mesh);
-    voxelLods.push({ size, mesh, instanceGuids });
+    voxelLods.push({ size, mesh, instanceGuids, originalColors, instanceIndicesByGuid });
 
     const option = document.createElement("option");
     option.value = String(voxelLods.length - 1);
