@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -161,3 +162,72 @@ def test_wireframe_is_visible_on_screen_for_mesh_display_mode(page, served_url):
 
     assert filled_count > 0
     assert wireframe_count < filled_count
+
+
+def test_wireframe_applies_across_all_voxel_lods(browser, tmp_path):
+    """コードレビュー指摘: 出荷済みテストは既定の単一LODしか検証しておらず、
+    「全LODに対してwireframeが適用される」という、buildVoxelLodsのコンストラクタ
+    オプションとsetWireframeEnabledのループの両方が担う挙動が未検証だった。"""
+    usda = tmp_path / "minimal.usda"
+    convert(FIXTURE, usda)
+    workdir = tmp_path / "www_multi_lod"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir, voxel_sizes=(0.5, 1.0))
+
+    server = make_server(workdir, port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        page = browser.new_page(viewport={"width": 1000, "height": 700})
+        _wait_for_load(page, f"http://127.0.0.1:{port}/")
+
+        assert page.evaluate("window.ifc2usdViewer.voxelLods.length") == 2
+
+        page.locator("#wireframe-toggle").check()
+
+        voxel_flags = _voxel_material_wireframe_flags(page)
+        assert len(voxel_flags) == 2
+        for flag in voxel_flags:
+            assert flag is True
+
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_toggling_wireframe_before_assets_finish_loading_is_applied_once_ready(page, served_url):
+    """コードレビュー指摘: buildVoxelLodsの`wireframe: wireframeEnabled`
+    コンストラクタ引数と、loadScene内の`if (wireframeEnabled) setWireframeEnabled(true)`
+    は、どちらもglTF/voxels.jsonの非同期取得が終わる前にトグルされたケースのために
+    存在するコードだが、既存テストは全て読み込み完了を待ってからトグルしており
+    このタイミングを一切踏んでいなかった。glTF/voxels.jsonの応答を意図的に遅らせ、
+    「取得中にトグル→完了後に正しく反映される」ことを検証する。"""
+
+    def _delay_route(route):
+        time.sleep(0.3)
+        route.continue_()
+
+    page.route("**/*.glb", _delay_route)
+    page.route("**/*_voxels.json", _delay_route)
+
+    page.goto(f"{served_url}?e2e")
+    # viewer.jsのモジュールトップレベル同期処理（wireframeToggleの初期状態読み取り・
+    # イベントリスナー登録、loadScene()の起動）は完了しているが、上でルートに
+    # 仕込んだ遅延によりglTF/voxels.jsonの非同期取得はまだ終わっていないはずの
+    # タイミングでトグルする。
+    page.wait_for_timeout(50)
+    page.locator("#wireframe-toggle").check()
+
+    page.wait_for_function("window.ifc2usdLoaded === true", timeout=10000)
+
+    mesh_flags = _mesh_material_wireframe_flags(page)
+    assert len(mesh_flags) > 0
+    for flag in mesh_flags:
+        assert flag is True
+
+    voxel_flags = _voxel_material_wireframe_flags(page)
+    assert len(voxel_flags) > 0
+    for flag in voxel_flags:
+        assert flag is True
