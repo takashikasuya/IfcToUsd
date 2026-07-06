@@ -480,7 +480,14 @@ function buildVoxelLods(voxelDescription) {
     const size = lod.size;
     const totalInstances = lod.elements.reduce((sum, el) => sum + el.indices.length, 0);
 
-    const material = new THREE.MeshStandardMaterial({ vertexColors: true, wireframe: wireframeEnabled });
+    // vertexColors:trueは指定しない: three.jsはInstancedMesh.instanceColorによる
+    // per-instance色(USE_INSTANCING_COLOR)をmaterial.vertexColorsの値と無関係に
+    // 有効化する一方、vertexColors:trueは*別に*ジオメトリ側のper-vertex color
+    // 属性(USE_COLOR)も要求してしまう。_voxelUnitBoxにはcolor属性が無いため、
+    // 未バインドのattributeがWebGLの既定値(0,0,0,1)を返し、vColorがinstanceColor
+    // 乗算前に(0,0,0)へゼロ化されボクセルが常に真っ黒になっていた
+    // （Issue #39 / E8-6。最小再現でVertexAttribPointer/シェーダ定義まで確認済み）。
+    const material = new THREE.MeshStandardMaterial({ wireframe: wireframeEnabled });
     const mesh = new THREE.InstancedMesh(_voxelUnitBox, material, totalInstances);
     const instanceGuids = new Array(totalInstances);
 
