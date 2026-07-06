@@ -339,6 +339,38 @@ def test_ghost_mode_dims_non_selected_without_bleeding_shared_material(page, sam
     assert is_b_ghosted is True
 
 
+def test_toggling_wireframe_while_ghosted_is_preserved_after_unghosting(page, same_color_served_url):
+    """CopilotのPR #47レビュー指摘の回帰テスト: ゴースト中は非選択要素の
+    mesh.materialが共有の_ghostMaterialを指しているため、setWireframeEnabledが
+    その時点でmesh.materialに触れても元のマテリアル(__preGhostMaterial)には
+    反映されない。ゴーストOFFで元のマテリアルへ復元した際、ワイヤフレーム状態が
+    現在のトグル値と食い違わないことを確認する。"""
+    _wait_for_load(page, same_color_served_url)
+
+    wall_a = _guid_by_name(page, "Wall A")
+    wall_b = _guid_by_name(page, "Wall B")
+
+    page.evaluate("window.ifc2usdViewer.setGhostModeEnabled(true)")
+    page.evaluate(f"window.ifc2usdViewer.selectByGuid({wall_a!r})")  # Bがゴースト済みになる
+
+    page.locator("#wireframe-toggle").check()  # Bがゴースト中にワイヤフレームON
+
+    page.evaluate("window.ifc2usdViewer.setGhostModeEnabled(false)")  # Bのマテリアル復元
+
+    wireframe_b = page.evaluate(f"""
+        () => {{
+            let wireframe = null;
+            window.ifc2usdViewer.getGlbRoot().traverse((child) => {{
+                if (child.isMesh && child.userData.guid === {wall_b!r}) {{
+                    wireframe = child.material.wireframe;
+                }}
+            }});
+            return wireframe;
+        }}
+    """)
+    assert wireframe_b is True
+
+
 def test_reselecting_a_previously_ghosted_element_still_gets_highlighted(page, same_color_served_url):
     """コードレビュー指摘の回帰テスト: ゴーストモードがONのまま選択をAからBへ
     切り替えると、Bはこの瞬間まで非選択(ゴースト済み)だったため

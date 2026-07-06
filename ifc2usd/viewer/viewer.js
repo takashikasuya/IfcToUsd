@@ -216,6 +216,7 @@ function renderPropertyPanel(guid) {
 }
 
 let selectedGuid = null;
+let hoverGuid = null;
 // GLTFLoaderがロードしたメッシュ階層のルート。クリック選択のレイキャスト対象を
 // voxelRoot(ボクセルInstancedMesh)と切り分けるために使う。loadScene()で設定する。
 let glbRoot = null;
@@ -233,19 +234,36 @@ function _ensureOwnMaterial(mesh) {
   }
 }
 
-function highlightMesh(mesh, on) {
+// emissiveの一時的な変更を1箇所へ集約する。hex===nullは「元の色へ戻す」を表す。
+// __originalEmissiveは初回変更時にのみ記録するため、選択・ホバーどちらが先に
+// 触っても常に「本当の既定色」を指し続ける（両者は同一meshに同時適用されない
+// 設計、後述のsetHoverGuid参照）。
+function _setMeshEmissiveTint(mesh, hex) {
   // gltf.py/usd.py never emit multi-material meshes (one PBRMaterial per mesh),
   // so mesh.material is always a single material here, never an Array.
   if (!mesh.material.emissive) return;
-  if (on) {
+  if (hex !== null) {
     _ensureOwnMaterial(mesh);
     if (mesh.userData.__originalEmissive === undefined) {
       mesh.userData.__originalEmissive = mesh.material.emissive.getHex();
     }
-    mesh.material.emissive.setHex(HIGHLIGHT_EMISSIVE);
+    mesh.material.emissive.setHex(hex);
   } else if (mesh.userData.__originalEmissive !== undefined) {
     mesh.material.emissive.setHex(mesh.userData.__originalEmissive);
   }
+}
+
+function highlightMesh(mesh, on) {
+  _setMeshEmissiveTint(mesh, on ? HIGHLIGHT_EMISSIVE : null);
+}
+
+// ホバー表現(E8-2 / ux-spec.md §3.2)。選択より弱い色味・弱いボクセルlerp比率で
+// 「予告」を示す。選択中要素へは適用しない(setHoverGuid側でガードする)ため、
+// _setMeshEmissiveTint/__originalEmissiveの復元先が選択と競合することはない。
+const HOVER_EMISSIVE = 0x222a44;
+
+function setMeshHoverTint(mesh, on) {
+  _setMeshEmissiveTint(mesh, on ? HOVER_EMISSIVE : null);
 }
 
 // 選択要素の輪郭表示（バックフェイス・ハル方式、ux-spec.md §3.1）。本体の
@@ -329,24 +347,32 @@ function _hideVoxelOutline() {
 // 個別Object3Dを持たないため、per-instance色(instanceColor)を選択中のインスタンス
 // だけ一時的に書き換えることでハイライトを表現する。
 const _voxelHighlightColor = new THREE.Color(HIGHLIGHT_EMISSIVE);
+const _voxelHoverColor = new THREE.Color(HOVER_EMISSIVE);
 const _voxelHighlightScratch = new THREE.Color();
 
-function highlightVoxelInstancesOfGuid(guid, on) {
+// 元の要素色を保ったまま識別できるよう、対象色へ寄せるだけで完全には置き換え
+// ない（element色そのものが手がかりの一部のため）。ratioが小さいほど「弱い」
+// 表現になる（ホバーは選択より弱くする、ux-spec.md §3.2）。
+function _tintVoxelInstancesOfGuid(guid, color, ratio, on) {
   for (const lod of voxelLods) {
     const indices = lod.instanceIndicesByGuid.get(guid);
     if (!indices || !lod.originalColors) continue;
 
     for (const i of indices) {
       _voxelHighlightScratch.fromArray(lod.originalColors, i * 3);
-      if (on) {
-        // 元の要素色を保ったまま識別できるよう、ハイライト色へ寄せるだけで
-        // 完全には置き換えない（element色そのものが手がかりの一部のため）。
-        _voxelHighlightScratch.lerp(_voxelHighlightColor, 0.6);
-      }
+      if (on) _voxelHighlightScratch.lerp(color, ratio);
       lod.mesh.setColorAt(i, _voxelHighlightScratch);
     }
     lod.mesh.instanceColor.needsUpdate = true;
   }
+}
+
+function highlightVoxelInstancesOfGuid(guid, on) {
+  _tintVoxelInstancesOfGuid(guid, _voxelHighlightColor, 0.6, on);
+}
+
+function hoverVoxelInstancesOfGuid(guid, on) {
+  _tintVoxelInstancesOfGuid(guid, _voxelHoverColor, 0.3, on);
 }
 
 function selectByGuid(guid) {
@@ -363,6 +389,15 @@ function selectByGuid(guid) {
     _hideVoxelOutline();
     const prevLi = treePanel.querySelector(`li[data-guid="${selectedGuid}"]`);
     if (prevLi) prevLi.classList.remove("selected");
+
+    // 選択解除された要素がなお(マウスが動いていないため)ホバー中なら、選択表現に
+    // 譲っていた弱いホバー表現をここで再適用する。さもないと、選択解除の瞬間
+    // カーソルはまだその要素の上にあるのに、ホバー表現もハイライト表現も
+    // 付かない状態になってしまう(次にpointermoveが起きるまで気付けない)。
+    if (selectedGuid === hoverGuid) {
+      forEachMeshOf(selectedGuid, (mesh) => setMeshHoverTint(mesh, true));
+      hoverVoxelInstancesOfGuid(selectedGuid, true);
+    }
   }
 
   selectedGuid = guid;
@@ -391,6 +426,38 @@ function selectByGuid(guid) {
   _applyGhostState();
 }
 
+function _setTreeRowHovered(guid, on) {
+  const li = treePanel.querySelector(`li[data-guid="${guid}"]`);
+  if (li) li.classList.toggle("hovered", on);
+}
+
+// ホバー状態の唯一の変更経路（E8-2）。3D側のpointermoveレイキャストとツリー行の
+// mouseenter/leaveの両方がこの関数を呼ぶため、3D→ツリー・ツリー→3Dの双方向連携が
+// 自然に揃う。選択中要素へは3D側のエミッシブ/ボクセル色を変更しない
+// （「選択中要素へのホバーは選択表現を優先する」）が、ツリー行の.hoveredクラス
+// 自体は選択有無に関わらず切り替える（ホバーの予告自体は選択中でも見せてよい）。
+function setHoverGuid(guid) {
+  if (guid === hoverGuid) return;
+
+  if (hoverGuid !== null) {
+    _setTreeRowHovered(hoverGuid, false);
+    if (hoverGuid !== selectedGuid) {
+      forEachMeshOf(hoverGuid, (mesh) => setMeshHoverTint(mesh, false));
+      hoverVoxelInstancesOfGuid(hoverGuid, false);
+    }
+  }
+
+  hoverGuid = guid;
+
+  if (hoverGuid !== null) {
+    _setTreeRowHovered(hoverGuid, true);
+    if (hoverGuid !== selectedGuid) {
+      forEachMeshOf(hoverGuid, (mesh) => setMeshHoverTint(mesh, true));
+      hoverVoxelInstancesOfGuid(hoverGuid, true);
+    }
+  }
+}
+
 // ゴースト表示（ux-spec.md §3.1）: 選択中、非選択のメッシュ要素を半透明にして
 // 選択要素を相対的に浮かび上がらせる。共有マテリアルの罠（highlightMeshと同じ
 // 問題）を避けるため、per-meshのプロパティ変更ではなく共有の単一ゴースト
@@ -415,6 +482,11 @@ function _setMeshGhosted(mesh, ghosted) {
   } else if (mesh.userData.__preGhostMaterial !== undefined) {
     mesh.material = mesh.userData.__preGhostMaterial;
     delete mesh.userData.__preGhostMaterial;
+    // ゴースト中にワイヤフレームがトグルされても、setWireframeEnabledはその時点の
+    // mesh.material(共有の_ghostMaterial)にしか触れず、__preGhostMaterial(元の
+    // マテリアル)側は更新されない。復元時に現在のwireframeEnabledへ同期する
+    // (PRレビュー指摘: ゴーストOFFでwireframe状態が食い違う不整合を修正)。
+    mesh.material.wireframe = wireframeEnabled;
   }
 }
 
@@ -866,6 +938,33 @@ renderer.domElement.addEventListener("dblclick", (event) => {
   fitCameraToBox(getBoundingBoxOfGuid(guid));
 });
 
+// 3D側のホバー(E8-2)。pointermoveはドラッグ中も含め高頻度に発火するため、
+// ここではレイキャストせず「最後のポインタ位置」を記録するだけにし、実際の
+// レイキャストはanimate()のrAFループ内で毎フレーム高々1回だけ行う
+// （受け入れ条件: レイキャストは1フレーム1回以内）。event.buttons!==0は
+// いずれかのボタンが押下中(=OrbitControlsのドラッグ操作中)を意味するため、
+// その間はホバー更新自体をスキップする（受け入れ条件: ドラッグ中はスキップ）。
+let _pendingHoverClientPosition = null;
+let hoverRaycastCount = 0; // E2Eテスト用(1フレーム1回以内であることの検証)
+
+renderer.domElement.addEventListener("pointermove", (event) => {
+  if (event.buttons !== 0) return;
+  _pendingHoverClientPosition = { x: event.clientX, y: event.clientY };
+});
+
+renderer.domElement.addEventListener("pointerleave", () => {
+  _pendingHoverClientPosition = null;
+  setHoverGuid(null);
+});
+
+function _processPendingHover() {
+  if (!_pendingHoverClientPosition) return;
+  const { x, y } = _pendingHoverClientPosition;
+  _pendingHoverClientPosition = null;
+  hoverRaycastCount++;
+  setHoverGuid(_guidAtClientPosition(x, y));
+}
+
 function renderTreeNode(node) {
   const li = document.createElement("li");
   li.dataset.guid = node.guid;
@@ -884,6 +983,11 @@ function renderTreeNode(node) {
   label.addEventListener("dblclick", () => {
     selectByGuid(node.guid);
     fitCameraToBox(getBoundingBoxOfGuid(node.guid));
+  });
+  // ホバーではスクロールしない(選択時のみスクロールする、E8-3と区別する)。
+  label.addEventListener("mouseenter", () => setHoverGuid(node.guid));
+  label.addEventListener("mouseleave", () => {
+    if (hoverGuid === node.guid) setHoverGuid(null);
   });
   li.appendChild(label);
 
@@ -959,6 +1063,7 @@ function animate() {
   requestAnimationFrame(animate);
   controls.update();
   updateClipPlanes();
+  _processPendingHover();
   renderer.render(scene, camera);
 }
 
@@ -992,6 +1097,9 @@ window.ifc2usdViewer = {
   },
   getGhostModeEnabled: () => ghostModeEnabled,
   isMeshGhosted: (mesh) => mesh.material === _ghostMaterial,
+  getHoverGuid: () => hoverGuid,
+  setHoverGuid,
+  getHoverRaycastCount: () => hoverRaycastCount,
 };
 
 resize();
