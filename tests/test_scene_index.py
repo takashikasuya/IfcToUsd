@@ -100,6 +100,29 @@ def test_default_assets_is_empty_dict_when_omitted(stage):
     assert result["assets"] == {}
 
 
+def test_element_node_has_color_matching_mesh_display_color(stage):
+    """E8-3(Issue #44)のツリー色チップ用。usd.pyがmeshへ書き込むdisplayColorを
+    そのまま反映する（tests/test_convert.pyのEXPECTED_WALLSと同じ既知色）。"""
+    result = build_scene_json(stage)
+    wall_north = _find(result["tree"], lambda n: n.get("name") == "Wall North")
+    assert wall_north["color"] == pytest.approx([0.8, 0.2, 0.2], abs=1e-4)
+
+    wall_east = _find(result["tree"], lambda n: n.get("name") == "Wall East")
+    assert wall_east["color"] == pytest.approx([0.2, 0.5, 0.8], abs=1e-4)
+
+
+def test_non_mesh_node_has_no_color(stage):
+    """Site/Building/Storeyはmesh子primを持たないため、colorはNone
+    (後方互換: 無ければビューワー側でチップ非表示)。"""
+    result = build_scene_json(stage)
+    site = result["tree"][0]
+    assert site["color"] is None
+    building = site["children"][0]
+    assert building["color"] is None
+    storey = building["children"][0]
+    assert storey["color"] is None
+
+
 def test_rejects_stage_without_default_prim():
     """defaultPrim未設定のUSDでは、生のRuntimeErrorではなく分かりやすいValueError。"""
     stage_without_default = Usd.Stage.CreateInMemory()

@@ -8,6 +8,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const viewport = document.getElementById("viewport");
 const treePanel = document.getElementById("tree-panel");
+const treeNodesContainer = document.getElementById("tree-nodes");
+const treeSearchInput = document.getElementById("tree-search-input");
 const propertyPanel = document.getElementById("property-panel");
 const voxelLodSelect = document.getElementById("voxel-lod-select");
 const sectionHeightSlider = document.getElementById("section-height-slider");
@@ -178,16 +180,24 @@ function forEachMeshOf(guid, callback) {
 // guid -> scene.json のツリーノード（class/customData等）。プロパティパネル表示用
 // （3Dやツリーの選択と違い、objectsByGuidにはUSDのcustomDataが載っていないため別管理）。
 const nodesByGuid = new Map();
+// guid -> 親のguid（ルート直下はnull）。選択時の祖先自動展開(E8-3)・検索での
+// 祖先表示・isolateの子孫判定に使う。
+const _parentGuidByGuid = new Map();
+// guid -> 対応する<li>要素。折りたたみ状態やisolateクラスの外部操作に使う
+// （renderTreeNode内のクロージャ変数に頼らずDOM状態を単一の真実source にする）。
+const _liByGuid = new Map();
 
 function buildNodesByGuid(tree) {
   nodesByGuid.clear();
-  function walk(nodes) {
+  _parentGuidByGuid.clear();
+  function walk(nodes, parentGuid) {
     for (const node of nodes) {
       nodesByGuid.set(node.guid, node);
-      walk(node.children);
+      _parentGuidByGuid.set(node.guid, parentGuid);
+      walk(node.children, node.guid);
     }
   }
-  walk(tree);
+  walk(tree, null);
 }
 
 function getBoundingBoxOfGuid(guid) {
@@ -418,7 +428,13 @@ function selectByGuid(guid) {
     highlightVoxelInstancesOfGuid(guid, true);
     _showVoxelOutline(guid);
     const li = treePanel.querySelector(`li[data-guid="${guid}"]`);
-    if (li) li.classList.add("selected");
+    if (li) {
+      li.classList.add("selected");
+      // E8-3: 選択行まで祖先を自動展開し、スクロールして見えるようにする
+      // (ホバーではスクロールしない、E8-2との違い)。
+      _expandAncestorsOf(guid);
+      li.scrollIntoView({ block: "nearest" });
+    }
   }
 
   renderPropertyPanel(guid);
@@ -970,16 +986,119 @@ function _processPendingHover() {
   setHoverGuid(guid);
 }
 
+// 初期展開状態(E8-3 / ux-spec.md §3.3): Storey(IfcBuildingStorey)までは展開し、
+// それより下(要素)は畳む。
+function _defaultExpandedForClass(cls) {
+  return cls === "IfcSite" || cls === "IfcBuilding" || cls === "IfcBuildingStorey";
+}
+
+function _rowPartOf(li, selector) {
+  return li.querySelector(`:scope > .tree-row > ${selector}`);
+}
+
+function _setNodeExpanded(guid, expanded) {
+  const li = _liByGuid.get(guid);
+  if (!li) return;
+  const toggle = _rowPartOf(li, ".tree-toggle");
+  const ul = li.querySelector(":scope > ul");
+  if (toggle && !toggle.classList.contains("tree-toggle-empty")) {
+    toggle.textContent = expanded ? "▾" : "▸";
+  }
+  if (ul) ul.style.display = expanded ? "" : "none";
+}
+
+// guidの祖先(親→…→ルート)をすべて展開する。選択時の自動展開・検索での
+// マッチ行表示の両方から使う共通ロジック。
+function _expandAncestorsOf(guid) {
+  let parent = _parentGuidByGuid.get(guid);
+  while (parent !== undefined && parent !== null) {
+    _setNodeExpanded(parent, true);
+    parent = _parentGuidByGuid.get(parent);
+  }
+}
+
+function _isDescendantOrSelf(guid, ancestorGuid) {
+  let current = guid;
+  while (current !== undefined && current !== null) {
+    if (current === ancestorGuid) return true;
+    current = _parentGuidByGuid.get(current);
+  }
+  return false;
+}
+
+// isolate(E8-3): 対象サブツリー以外を非表示にする。同じ行をもう一度押すと解除する。
+// 一度に有効化できるisolateは1つ(スコープを絞ったシンプルな実装)。
+// スコープ外(既知の制約、ゴーストモードがボクセルを対象外にしているのと同じ理由):
+// - ボクセル(voxelRoot配下のInstancedMesh)はobjectsByGuid/setObjectVisibleの対象外
+//   のため、isolateはメッシュ表示にのみ効く。
+// - isolate ON/OFF時、各行の可視性チェックボックスを一括で書き換えるため、
+//   isolate中に手動でチェックボックスを操作していた場合、その変更はisolate
+//   解除時に失われる(全要素可視へ戻る)。可視性の事前状態を保存/復元するには
+//   スナップショット機構が要るが、このストーリーの受け入れ条件には含まれない
+//   ため見送る。
+let isolatedGuid = null;
+
+function toggleIsolate(guid) {
+  const wasIsolating = isolatedGuid !== null;
+  const target = isolatedGuid === guid ? null : guid;
+
+  if (wasIsolating) {
+    const prevLi = _liByGuid.get(isolatedGuid);
+    if (prevLi) prevLi.classList.remove("isolated");
+  }
+  isolatedGuid = target;
+
+  for (const [g, li] of _liByGuid) {
+    // 対象の子孫だけでなく祖先(Site/Building/Storeyなど)も可視のままにする。
+    // gltf.pyは空間階層の非メッシュノード(Site/Building/Storey)もThree.jsの
+    // 親Object3D/Groupとして書き出しており、three.jsは親.visible===falseで
+    // 子孫の描画自体を打ち切る(祖先を隠すと対象自身も画面から消えてしまう)。
+    const visible = target === null || _isDescendantOrSelf(g, target) || _isDescendantOrSelf(target, g);
+    setObjectVisible(g, visible);
+    const checkbox = _rowPartOf(li, ".tree-visibility");
+    if (checkbox) checkbox.checked = visible;
+  }
+
+  if (target !== null) {
+    const li = _liByGuid.get(target);
+    if (li) li.classList.add("isolated");
+  }
+}
+
 function renderTreeNode(node) {
   const li = document.createElement("li");
   li.dataset.guid = node.guid;
+  _liByGuid.set(node.guid, li);
+
+  const row = document.createElement("div");
+  row.className = "tree-row";
+
+  const hasChildren = node.children && node.children.length > 0;
+  const toggle = document.createElement("span");
+  toggle.className = hasChildren ? "tree-toggle" : "tree-toggle tree-toggle-empty";
+  if (hasChildren) {
+    const expanded = _defaultExpandedForClass(node.class);
+    toggle.textContent = expanded ? "▾" : "▸";
+    toggle.addEventListener("click", () => {
+      _setNodeExpanded(node.guid, toggle.textContent !== "▾");
+    });
+  }
+  row.appendChild(toggle);
 
   const visibility = document.createElement("input");
   visibility.type = "checkbox";
   visibility.className = "tree-visibility";
   visibility.checked = true;
   visibility.addEventListener("change", () => setObjectVisible(node.guid, visibility.checked));
-  li.appendChild(visibility);
+  row.appendChild(visibility);
+
+  if (node.color) {
+    const [r, g, b] = node.color;
+    const chip = document.createElement("span");
+    chip.className = "tree-color-chip";
+    chip.style.background = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+    row.appendChild(chip);
+  }
 
   const label = document.createElement("span");
   label.className = "tree-label";
@@ -994,13 +1113,27 @@ function renderTreeNode(node) {
   label.addEventListener("mouseleave", () => {
     if (hoverGuid === node.guid) setHoverGuid(null);
   });
-  li.appendChild(label);
+  row.appendChild(label);
 
-  if (node.children && node.children.length > 0) {
+  const isolateBtn = document.createElement("button");
+  isolateBtn.type = "button";
+  isolateBtn.className = "tree-isolate-btn";
+  isolateBtn.title = "Isolate";
+  isolateBtn.textContent = "⊙";
+  isolateBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleIsolate(node.guid);
+  });
+  row.appendChild(isolateBtn);
+
+  li.appendChild(row);
+
+  if (hasChildren) {
     const ul = document.createElement("ul");
     for (const child of node.children) {
       ul.appendChild(renderTreeNode(child));
     }
+    if (!_defaultExpandedForClass(node.class)) ul.style.display = "none";
     li.appendChild(ul);
   }
 
@@ -1008,14 +1141,93 @@ function renderTreeNode(node) {
 }
 
 function renderTree(tree) {
-  treePanel.innerHTML = "";
+  _liByGuid.clear();
+  treeNodesContainer.innerHTML = "";
   const ul = document.createElement("ul");
   ul.className = "tree-root";
   for (const node of tree) {
     ul.appendChild(renderTreeNode(node));
   }
-  treePanel.appendChild(ul);
+  treeNodesContainer.appendChild(ul);
 }
+
+// 検索/絞り込み(E8-3): 名前/クラス/GUIDの部分一致(大文字小文字無視)。
+// マッチ行とその祖先だけを表示し、マッチ部分をハイライトする。
+function _nodeSearchText(node) {
+  return `${node.name || ""} ${node.class || ""} ${node.guid || ""}`.toLowerCase();
+}
+
+function _clearMatchHighlight(li) {
+  const label = _rowPartOf(li, ".tree-label");
+  if (!label || label.dataset.originalText === undefined) return;
+  label.textContent = label.dataset.originalText;
+}
+
+function _highlightMatch(li, query) {
+  const label = _rowPartOf(li, ".tree-label");
+  if (!label) return;
+  const original = label.dataset.originalText !== undefined ? label.dataset.originalText : label.textContent;
+  label.dataset.originalText = original;
+
+  const idx = original.toLowerCase().indexOf(query);
+  if (idx === -1) {
+    label.textContent = original;
+    return;
+  }
+  label.textContent = "";
+  label.appendChild(document.createTextNode(original.slice(0, idx)));
+  const mark = document.createElement("mark");
+  mark.className = "tree-match";
+  mark.textContent = original.slice(idx, idx + query.length);
+  label.appendChild(mark);
+  label.appendChild(document.createTextNode(original.slice(idx + query.length)));
+}
+
+function applyTreeSearch(rawQuery) {
+  const query = rawQuery.trim().toLowerCase();
+
+  if (!query) {
+    // クリアで全行の表示は戻すが、検索中にマッチ行を見せるため強制展開した
+    // 祖先は畳み直さない(単なる絞り込み解除であり、折りたたみ状態のリセットは
+    // 別の操作という整理。副作用として無害なため、この単純化を受け入れる)。
+    for (const li of _liByGuid.values()) {
+      li.classList.remove("search-hidden");
+      _clearMatchHighlight(li);
+    }
+    return;
+  }
+
+  const matchedGuids = new Set();
+  for (const [guid, node] of nodesByGuid) {
+    if (_nodeSearchText(node).includes(query)) matchedGuids.add(guid);
+  }
+
+  const visibleGuids = new Set(matchedGuids);
+  for (const guid of matchedGuids) {
+    let parent = _parentGuidByGuid.get(guid);
+    while (parent !== undefined && parent !== null) {
+      visibleGuids.add(parent);
+      parent = _parentGuidByGuid.get(parent);
+    }
+  }
+
+  for (const [guid, li] of _liByGuid) {
+    li.classList.toggle("search-hidden", !visibleGuids.has(guid));
+    if (matchedGuids.has(guid)) {
+      _highlightMatch(li, query);
+      _expandAncestorsOf(guid); // 折りたたまれた祖先の中に埋もれないようにする
+    } else {
+      _clearMatchHighlight(li);
+    }
+  }
+}
+
+let _treeSearchDebounceTimer = null;
+treeSearchInput.addEventListener("input", () => {
+  clearTimeout(_treeSearchDebounceTimer);
+  const value = treeSearchInput.value;
+  _treeSearchDebounceTimer = setTimeout(() => applyTreeSearch(value), 150);
+});
 
 async function loadScene() {
   const response = await fetch("./scene.json");
@@ -1105,6 +1317,9 @@ window.ifc2usdViewer = {
   getHoverGuid: () => hoverGuid,
   setHoverGuid,
   getHoverRaycastCount: () => hoverRaycastCount,
+  applyTreeSearch,
+  toggleIsolate,
+  getIsolatedGuid: () => isolatedGuid,
 };
 
 resize();

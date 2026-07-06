@@ -177,7 +177,7 @@ def test_hovering_tree_row_applies_hover_tint_to_3d_object(page, served_url):
 
     assert _mesh_emissive_hex(page, guid) == 0
 
-    page.locator(f'li[data-guid="{guid}"] > .tree-label').hover()
+    page.locator(f'li[data-guid="{guid}"] .tree-label').hover()
 
     assert page.evaluate("window.ifc2usdViewer.getHoverGuid()") == guid
     assert _mesh_emissive_hex(page, guid) == 0x222A44
@@ -240,7 +240,7 @@ def test_hover_does_not_scroll_the_tree_panel(page, served_url):
     page.evaluate("document.getElementById('tree-panel').scrollTop = 3")
     before = page.evaluate("document.getElementById('tree-panel').scrollTop")
 
-    page.locator(f'li[data-guid="{guid}"] > .tree-label').hover()
+    page.locator(f'li[data-guid="{guid}"] .tree-label').hover()
 
     after = page.evaluate("document.getElementById('tree-panel').scrollTop")
     assert after == before
@@ -253,7 +253,7 @@ def test_hovering_the_selected_element_does_not_override_its_highlight(page, ser
     page.evaluate(f"window.ifc2usdViewer.selectByGuid({guid!r})")
     assert _mesh_emissive_hex(page, guid) == 0x3355FF
 
-    page.locator(f'li[data-guid="{guid}"] > .tree-label').hover()
+    page.locator(f'li[data-guid="{guid}"] .tree-label').hover()
 
     assert page.evaluate("window.ifc2usdViewer.getHoverGuid()") == guid
     assert _mesh_emissive_hex(page, guid) == 0x3355FF  # 選択表現のまま(ホバー色に上書きされない)

@@ -462,7 +462,7 @@ def test_double_click_tree_row_fits_camera_to_element(page, served_url):
         }}
     """)
 
-    page.locator(f'li[data-guid="{guid}"] > .tree-label').dblclick()
+    page.locator(f'li[data-guid="{guid}"] .tree-label').dblclick()
 
     new_target = page.evaluate("window.ifc2usdViewer.controls.target.toArray()")
     for actual, expected in zip(new_target, expected_center):

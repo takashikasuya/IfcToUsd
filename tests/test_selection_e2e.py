@@ -111,7 +111,7 @@ def test_property_panel_shows_class_guid_and_custom_data(page, served_url):
     _wait_for_load(page, served_url)
 
     wall_guid = _guid_by_name(page, "Wall North")
-    page.locator(f'[data-guid="{wall_guid}"] > .tree-label').click()
+    page.locator(f'[data-guid="{wall_guid}"] .tree-label').click()
 
     panel_text = page.locator("#property-panel").inner_text()
     assert "Wall North" in panel_text
@@ -125,7 +125,7 @@ def test_property_panel_clears_when_nothing_selected(page, served_url):
     assert page.locator("#property-panel").inner_text().strip() == ""
 
     wall_guid = _guid_by_name(page, "Wall North")
-    page.locator(f'[data-guid="{wall_guid}"] > .tree-label').click()
+    page.locator(f'[data-guid="{wall_guid}"] .tree-label').click()
     assert page.locator("#property-panel").inner_text().strip() != ""
 
 
