@@ -243,4 +243,6 @@ def test_highlight_applies_across_all_voxel_lods(page, browser, tmp_path):
 # 「たまたま暗すぎて差が検出できるか」を検証してしまい信頼できないため、
 # 上のinstanceColorバッファ直接検証（この repo で既存の
 # test_voxel_instance_colors_match_element_color と同じ手法）で十分な回帰保護
-# とし、画素比較テストはIssue #39解決後に追加する。
+# とした。Issue #39自体はvertexColors:trueの除去で解決済み（CLAUDE.md該当箇所参照）で、
+# ボクセル表示モードの画素レベル検証はtests/test_voxel_rendering_color_e2e.pyに
+# 追加してある（ここでの追加は見送り、ハイライト固有の回帰保護は上のバッファ検証のままとする）。
