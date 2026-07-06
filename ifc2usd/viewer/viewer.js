@@ -14,6 +14,7 @@ const sectionHeightSlider = document.getElementById("section-height-slider");
 const sdfSliceToggle = document.getElementById("sdf-slice-toggle");
 const sdfSliceHeightSlider = document.getElementById("sdf-slice-height-slider");
 const wireframeToggle = document.getElementById("wireframe-toggle");
+const ghostToggle = document.getElementById("ghost-toggle");
 
 const HIGHLIGHT_EMISSIVE = 0x3355ff;
 
@@ -167,7 +168,10 @@ function forEachMeshOf(guid, callback) {
   const obj = objectsByGuid.get(guid);
   if (!obj) return;
   obj.traverse((child) => {
-    if (child.isMesh && child.material) callback(child);
+    // "__outline"は_showMeshOutlineが追加する装飾用の子メッシュ(isMesh===true)。
+    // 除外しないと再選択のたびにforEachMeshOf自身の走査で拾われ、outline-of-
+    // outlineが無限に増殖してスタックオーバーフローする。
+    if (child.isMesh && child.material && child.name !== "__outline") callback(child);
   });
 }
 
@@ -216,17 +220,106 @@ let selectedGuid = null;
 // voxelRoot(ボクセルInstancedMesh)と切り分けるために使う。loadScene()で設定する。
 let glbRoot = null;
 
+// gltf.pyはマテリアルをメッシュごとに独立生成するが、trimeshのGLBエクスポート時に
+// 同一プロパティ値(色/metallic/roughness)のマテリアルは1つに重複排除される。その
+// ため同色の複数要素はGLTFLoaderロード後も同一THREE.Material参照を共有しており、
+// mesh.materialへの直接変更（emissive/opacity等）は同色の他要素へ波及する
+// （E8-1着手前に検証・確認済み）。書き込み前に一度だけcloneして各meshへ
+// 専有マテリアルを持たせることで波及を防ぐ。
+function _ensureOwnMaterial(mesh) {
+  if (!mesh.userData.__ownMaterial) {
+    mesh.material = mesh.material.clone();
+    mesh.userData.__ownMaterial = true;
+  }
+}
+
 function highlightMesh(mesh, on) {
   // gltf.py/usd.py never emit multi-material meshes (one PBRMaterial per mesh),
   // so mesh.material is always a single material here, never an Array.
   if (!mesh.material.emissive) return;
   if (on) {
+    _ensureOwnMaterial(mesh);
     if (mesh.userData.__originalEmissive === undefined) {
       mesh.userData.__originalEmissive = mesh.material.emissive.getHex();
     }
     mesh.material.emissive.setHex(HIGHLIGHT_EMISSIVE);
   } else if (mesh.userData.__originalEmissive !== undefined) {
     mesh.material.emissive.setHex(mesh.userData.__originalEmissive);
+  }
+}
+
+// 選択要素の輪郭表示（バックフェイス・ハル方式、ux-spec.md §3.1）。本体の
+// 複製(法線方向へわずかに膨らませる)をBackSideで背後に描く。ジオメトリ・親子
+// 関係は元メッシュを共有するため、追加のクローン・変換計算コストはdraw call
+// 1回分のみで済む。
+const OUTLINE_THICKNESS = 0.03;
+
+function _createOutlineMaterial() {
+  const material = new THREE.MeshBasicMaterial({ color: HIGHLIGHT_EMISSIVE, side: THREE.BackSide });
+  material.onBeforeCompile = (shader) => {
+    // objectNormal(法線変換チャンク)はUSE_ENVMAP/USE_SKINNING時のみ宣言されるため
+    // 依存できない。全頂点シェーダで無条件宣言される生のattribute vec3 normalを
+    // ローカル空間のまま使う（このユースケースでは十分）。
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>\n\ttransformed += normalize(normal) * ${OUTLINE_THICKNESS.toFixed(6)};`,
+    );
+  };
+  return material;
+}
+
+const _outlineMaterial = _createOutlineMaterial();
+
+function _showMeshOutline(mesh) {
+  if (mesh.userData.__outline) return;
+  const outline = new THREE.Mesh(mesh.geometry, _outlineMaterial);
+  outline.name = "__outline";
+  // ハイライト表現専用の装飾オブジェクトなので、クリック選択のレイキャスト対象に
+  // 含めない（CLAUDE.md記載のRaycaster規約: 対象は明示リストで組む）。
+  outline.raycast = () => {};
+  mesh.add(outline);
+  mesh.userData.__outline = outline;
+}
+
+function _hideMeshOutline(mesh) {
+  const outline = mesh.userData.__outline;
+  if (!outline) return;
+  mesh.remove(outline);
+  delete mesh.userData.__outline;
+}
+
+// ボクセル側の輪郭表示。E7-3のinstanceIndicesByGuidを流用し、選択要素のインスタンス
+// だけを含む一時的なInstancedMeshを~1.06倍スケールのBackSideで生成する
+// （ux-spec.md §3.1）。
+const _voxelOutlineScaleMatrix = new THREE.Matrix4().makeScale(1.06, 1.06, 1.06);
+
+function _showVoxelOutline(guid) {
+  const matrix = new THREE.Matrix4();
+  for (const lod of voxelLods) {
+    const indices = lod.instanceIndicesByGuid.get(guid);
+    if (!indices || indices.length === 0) continue;
+
+    const outlineMesh = new THREE.InstancedMesh(_voxelUnitBox, _outlineMaterial, indices.length);
+    for (let i = 0; i < indices.length; i++) {
+      lod.mesh.getMatrixAt(indices[i], matrix);
+      // 並進+スケールのみ(回転無し)の行列なので、対角スケール行列同士は可換:
+      // 中心位置を保ったまま一様スケールだけ~1.06倍される。
+      matrix.multiply(_voxelOutlineScaleMatrix);
+      outlineMesh.setMatrixAt(i, matrix);
+    }
+    outlineMesh.instanceMatrix.needsUpdate = true;
+    outlineMesh.raycast = () => {};
+    voxelRoot.add(outlineMesh);
+    lod.outlineMesh = outlineMesh;
+  }
+}
+
+function _hideVoxelOutline() {
+  for (const lod of voxelLods) {
+    if (!lod.outlineMesh) continue;
+    voxelRoot.remove(lod.outlineMesh);
+    lod.outlineMesh.dispose();
+    lod.outlineMesh = null;
   }
 }
 
@@ -262,8 +355,12 @@ function selectByGuid(guid) {
   if (selectedGuid === guid) return;
 
   if (selectedGuid !== null) {
-    forEachMeshOf(selectedGuid, (mesh) => highlightMesh(mesh, false));
+    forEachMeshOf(selectedGuid, (mesh) => {
+      highlightMesh(mesh, false);
+      _hideMeshOutline(mesh);
+    });
     highlightVoxelInstancesOfGuid(selectedGuid, false);
+    _hideVoxelOutline();
     const prevLi = treePanel.querySelector(`li[data-guid="${selectedGuid}"]`);
     if (prevLi) prevLi.classList.remove("selected");
   }
@@ -271,14 +368,55 @@ function selectByGuid(guid) {
   selectedGuid = guid;
 
   if (guid !== null) {
-    forEachMeshOf(guid, (mesh) => highlightMesh(mesh, true));
+    forEachMeshOf(guid, (mesh) => {
+      highlightMesh(mesh, true);
+      _showMeshOutline(mesh);
+    });
     highlightVoxelInstancesOfGuid(guid, true);
+    _showVoxelOutline(guid);
     const li = treePanel.querySelector(`li[data-guid="${guid}"]`);
     if (li) li.classList.add("selected");
   }
 
   renderPropertyPanel(guid);
   setSdfSliceUiForSelection(guid);
+  _applyGhostState();
+}
+
+// ゴースト表示（ux-spec.md §3.1）: 選択中、非選択のメッシュ要素を半透明にして
+// 選択要素を相対的に浮かび上がらせる。共有マテリアルの罠（highlightMeshと同じ
+// 問題）を避けるため、per-meshのプロパティ変更ではなく共有の単一ゴースト
+// マテリアルへの差し替え+復元で実装する（clone乱発を避ける、ux-spec.md記載の
+// 方針通り）。スコープはメッシュ表示のみ（ボクセルのInstancedMeshは
+// インスタンス単位の不透明度を持たず、対応には別途per-instance alpha機構が
+// 必要なため、このストーリーでは対象外とする）。
+const _ghostMaterial = new THREE.MeshBasicMaterial({
+  color: 0x888888,
+  transparent: true,
+  opacity: 0.15,
+  depthWrite: false,
+});
+let ghostModeEnabled = false;
+
+function _setMeshGhosted(mesh, ghosted) {
+  if (ghosted) {
+    if (mesh.userData.__preGhostMaterial === undefined) {
+      mesh.userData.__preGhostMaterial = mesh.material;
+    }
+    mesh.material = _ghostMaterial;
+  } else if (mesh.userData.__preGhostMaterial !== undefined) {
+    mesh.material = mesh.userData.__preGhostMaterial;
+    delete mesh.userData.__preGhostMaterial;
+  }
+}
+
+function _applyGhostState() {
+  for (const [guid, obj] of objectsByGuid) {
+    const shouldGhost = ghostModeEnabled && selectedGuid !== null && guid !== selectedGuid;
+    obj.traverse((child) => {
+      if (child.isMesh && child.material && child.name !== "__outline") _setMeshGhosted(child, shouldGhost);
+    });
+  }
 }
 
 // 要素ごとの narrow-band SDF 水平スライス（E5-3、sdf_slice.py が生成する
@@ -601,6 +739,11 @@ function setWireframeEnabled(enabled) {
 
 wireframeToggle.addEventListener("change", () => setWireframeEnabled(wireframeToggle.checked));
 
+ghostToggle.addEventListener("change", () => {
+  ghostModeEnabled = ghostToggle.checked;
+  _applyGhostState();
+});
+
 async function loadVoxels(voxelsUrl) {
   const response = await fetch(voxelsUrl);
   if (!response.ok) {
@@ -670,18 +813,10 @@ renderer.domElement.addEventListener("pointercancel", () => {
   pointerDownPosition = null;
 });
 
-renderer.domElement.addEventListener("pointerup", (event) => {
-  const downPosition = pointerDownPosition;
-  pointerDownPosition = null;
-  if (!downPosition || !event.isPrimary || event.button !== 0) return;
-
-  const dx = event.clientX - downPosition.x;
-  const dy = event.clientY - downPosition.y;
-  if (Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD_PX) return;
-
+function _guidAtClientPosition(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
-  pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(pointerNdc, camera);
   // 既知の制約（Issue #18時点で未対応、意図的に据え置き）: three.jsのRaycasterは
@@ -691,13 +826,36 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   // ここで `intersections.filter(i => i.point.y <= sectionClipPlane.constant)` の
   // ようなフィルタを追加する。
   const intersections = raycaster.intersectObjects(currentRaycastTargets(), true);
-  if (intersections.length === 0) return;
+  if (intersections.length === 0) return null;
 
   const hit = intersections[0];
-  const guid = hit.object.isInstancedMesh
+  return hit.object.isInstancedMesh
     ? findGuidOfVoxelInstance(hit.object, hit.instanceId)
     : findGuidOfObject(hit.object);
+}
+
+renderer.domElement.addEventListener("pointerup", (event) => {
+  const downPosition = pointerDownPosition;
+  pointerDownPosition = null;
+  if (!downPosition || !event.isPrimary || event.button !== 0) return;
+
+  const dx = event.clientX - downPosition.x;
+  const dy = event.clientY - downPosition.y;
+  if (Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD_PX) return;
+
+  const guid = _guidAtClientPosition(event.clientX, event.clientY);
   if (guid !== null) selectByGuid(guid);
+});
+
+// ダブルクリックで選択+フィット(ux-spec.md §3.1)。ブラウザはdblclick発火前に
+// 通常のclick/pointerup2回をそのまま発火させるため、1回目のクリックで既に選択済み
+// になった上でフィットが追加される（selectByGuidの2回目呼び出しは同一guidなら
+// no-opなので無害）。
+renderer.domElement.addEventListener("dblclick", (event) => {
+  const guid = _guidAtClientPosition(event.clientX, event.clientY);
+  if (guid === null) return;
+  selectByGuid(guid);
+  fitCameraToBox(getBoundingBoxOfGuid(guid));
 });
 
 function renderTreeNode(node) {
@@ -715,6 +873,10 @@ function renderTreeNode(node) {
   label.className = "tree-label";
   label.textContent = node.name ? `${node.name} (${node.class})` : node.class;
   label.addEventListener("click", () => selectByGuid(node.guid));
+  label.addEventListener("dblclick", () => {
+    selectByGuid(node.guid);
+    fitCameraToBox(getBoundingBoxOfGuid(node.guid));
+  });
   li.appendChild(label);
 
   if (node.children && node.children.length > 0) {
@@ -816,6 +978,12 @@ window.ifc2usdViewer = {
   setSectionClipHeight,
   hasSdfSlicesFor: (guid) => sdfSlicesByGuid.has(guid),
   getSdfSliceMesh: () => sdfSliceMesh,
+  setGhostModeEnabled: (enabled) => {
+    ghostModeEnabled = enabled;
+    _applyGhostState();
+  },
+  getGhostModeEnabled: () => ghostModeEnabled,
+  isMeshGhosted: (mesh) => mesh.material === _ghostMaterial,
 };
 
 resize();
