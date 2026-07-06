@@ -206,23 +206,125 @@ function getBoundingBoxOfGuid(guid) {
   return new THREE.Box3().setFromObject(obj);
 }
 
+// scene_index.pyの_METADATA_KEYSと同じ定義順(E8-4 / ux-spec.md §3.4)。
+// customDataオブジェクトのキー順もPython側で既にこの順で挿入されているが、
+// 表示側の意図を明示するため独立して定義する。
+const PROPERTY_KEY_ORDER = ["GUID", "class", "Name", "LongName", "Description", "Latitude", "Longitude"];
+
+// IfcCompoundPlaneAngleMeasure由来の度.分.秒.(百万分の一秒)ドット区切り文字列
+// (usd.py参照)を10進度へ変換する。度が負の場合は南半球/西半球を表し、
+// 分・秒は符号無しの大きさとして加算する。
+function _dmsStringToDecimalDegrees(dmsString) {
+  // usd.pyのset_custom_dataは、IfcSiteにRefLatitude/RefLongitudeが未設定でも
+  // Latitude/Longitude customData自体は書き込む(値が空文字列になるだけ)。
+  // ""をsplitすると[""]（Number("")は0、NaNではない）になるため、下のNaN
+  // ガードだけでは弾けず「0.000000°」という実在しない値を表示してしまう
+  // (コードレビューで検出)。空文字列は明示的にnullへ落とし、呼び出し側に
+  // 生値(空文字列)へフォールバックさせる。
+  if (dmsString === "") return null;
+  const parts = String(dmsString).split(".").map(Number);
+  if (parts.length === 0 || parts.some((p) => Number.isNaN(p))) return null;
+  const [degrees, minutes = 0, seconds = 0, millionths = 0] = parts;
+  const sign = degrees < 0 ? -1 : 1;
+  return sign * (Math.abs(degrees) + minutes / 60 + (seconds + millionths / 1e6) / 3600);
+}
+
+function _copyTextToClipboard(text, onDone) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => onDone(true),
+      () => onDone(false),
+    );
+  } else {
+    onDone(false);
+  }
+}
+
 function renderPropertyPanel(guid) {
   propertyPanel.innerHTML = "";
-  if (guid === null) return;
+
+  if (guid === null) {
+    const guide = document.createElement("p");
+    guide.className = "property-guide";
+    guide.textContent = "要素をクリックまたはツリーから選択してください";
+    propertyPanel.appendChild(guide);
+    return;
+  }
 
   const node = nodesByGuid.get(guid);
   if (!node) return;
 
+  const cd = node.customData;
   const dl = document.createElement("dl");
-  for (const [key, value] of Object.entries(node.customData)) {
+
+  for (const key of PROPERTY_KEY_ORDER) {
+    if (!(key in cd)) continue;
+    const value = cd[key];
+
     const dt = document.createElement("dt");
     dt.textContent = key;
     const dd = document.createElement("dd");
-    dd.textContent = value;
+
+    if (key === "class") {
+      const chip = document.createElement("span");
+      chip.className = "property-class-chip";
+      if (node.color) {
+        const [r, g, b] = node.color;
+        chip.style.background = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+      }
+      dd.appendChild(chip);
+      const displayName = document.createElement("span");
+      displayName.textContent = value.startsWith("Ifc") ? value.slice(3) : value;
+      dd.appendChild(displayName);
+    } else if (key === "GUID") {
+      const guidText = document.createElement("span");
+      guidText.className = "property-guid-text";
+      guidText.textContent = value;
+      dd.appendChild(guidText);
+
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "property-copy-btn";
+      copyBtn.textContent = "Copy";
+      copyBtn.title = "Copy GUID";
+      copyBtn.addEventListener("click", () => {
+        _copyTextToClipboard(value, (ok) => {
+          if (ok) {
+            copyBtn.textContent = "Copied";
+            setTimeout(() => {
+              copyBtn.textContent = "Copy";
+            }, 1200);
+          } else {
+            // クリップボードAPIが使えない/失敗した場合のフォールバック:
+            // GUIDテキストを選択状態にし、手動コピー(Ctrl+C)できるようにする。
+            const range = document.createRange();
+            range.selectNodeContents(guidText);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        });
+      });
+      dd.appendChild(copyBtn);
+    } else if (key === "Latitude" || key === "Longitude") {
+      const decimal = _dmsStringToDecimalDegrees(value);
+      dd.textContent = decimal !== null ? `${decimal.toFixed(6)}°` : value;
+    } else {
+      dd.textContent = value;
+    }
+
     dl.appendChild(dt);
     dl.appendChild(dd);
   }
+
   propertyPanel.appendChild(dl);
+
+  // E9(ビルOS連携デジタルツイン)用: Live Dataセクションの挿入位置を確保する。
+  // 現時点では空のプレースホルダ(digital-twin-spec.md参照、このストーリーの
+  // スコープ外)。
+  const liveData = document.createElement("div");
+  liveData.id = "property-live-data";
+  propertyPanel.appendChild(liveData);
 }
 
 let selectedGuid = null;
@@ -1324,6 +1426,9 @@ window.ifc2usdViewer = {
 
 resize();
 animate();
+// 未選択時の操作ガイド(E8-4)はシーン読み込み完了を待たず、ページ表示直後から
+// 見えているべき状態。
+renderPropertyPanel(null);
 
 loadScene()
   .then((sceneDescription) => {
