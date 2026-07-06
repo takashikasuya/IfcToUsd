@@ -954,6 +954,7 @@ renderer.domElement.addEventListener("pointermove", (event) => {
 
 renderer.domElement.addEventListener("pointerleave", () => {
   _pendingHoverClientPosition = null;
+  renderer.domElement.style.cursor = "";
   setHoverGuid(null);
 });
 
@@ -962,7 +963,11 @@ function _processPendingHover() {
   const { x, y } = _pendingHoverClientPosition;
   _pendingHoverClientPosition = null;
   hoverRaycastCount++;
-  setHoverGuid(_guidAtClientPosition(x, y));
+  const guid = _guidAtClientPosition(x, y);
+  // ux-spec.md §3.2: 3D側のホバーでカーソルをpointerにする。ツリー行は既存の
+  // CSS(.tree-label { cursor: pointer })で常にpointerなので対象外。
+  renderer.domElement.style.cursor = guid !== null ? "pointer" : "";
+  setHoverGuid(guid);
 }
 
 function renderTreeNode(node) {

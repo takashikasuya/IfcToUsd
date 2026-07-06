@@ -127,6 +127,35 @@ def _fit_and_render(page, guid, padding_factor=1.8):
     page.wait_for_timeout(150)
 
 
+def test_hovering_3d_object_sets_pointer_cursor(page, served_url):
+    """ux-spec.md §3.2: 3D側のホバーで「カーソルをpointerにする」。"""
+    _wait_for_load(page, served_url)
+    page.evaluate('window.ifc2usdViewer.setDisplayMode("mesh")')
+    guid = _guid_by_name(page, "Wall North")
+    _fit_and_render(page, guid)
+
+    canvas_cursor = lambda: page.evaluate("""
+        () => document.querySelector('#viewport canvas').style.cursor
+    """)
+    assert canvas_cursor() != "pointer"
+
+    _dispatch_pointer_move_at_canvas_center(page)
+    _wait_one_animation_frame(page)
+    assert canvas_cursor() == "pointer"
+
+    # 何もない場所へ移動するとdefaultへ戻る。
+    page.evaluate("""
+        () => {
+            const canvas = document.querySelector('#viewport canvas');
+            canvas.dispatchEvent(new PointerEvent('pointermove', {
+                clientX: 1, clientY: 1, bubbles: true, isPrimary: true, buttons: 0,
+            }));
+        }
+    """)
+    _wait_one_animation_frame(page)
+    assert canvas_cursor() != "pointer"
+
+
 def test_hovering_3d_object_adds_hovered_class_to_tree_row(page, served_url):
     _wait_for_load(page, served_url)
     page.evaluate('window.ifc2usdViewer.setDisplayMode("mesh")')
