@@ -369,6 +369,14 @@ function selectByGuid(guid) {
 
   if (guid !== null) {
     forEachMeshOf(guid, (mesh) => {
+      // ゴーストモード中に「非選択(ゴースト済み)要素」を新たに選択した場合、
+      // mesh.materialが共有の_ghostMaterial(MeshBasicMaterial、emissive無し)を
+      // 指したままhighlightMeshを呼ぶと、_ensureOwnMaterial/emissive設定が
+      // 静かにスキップされてしまう(コードレビューで検出)。ハイライト適用前に
+      // 選択要素自身のゴーストを先に解除しておく。末尾の_applyGhostState()は
+      // 「非選択要素」側のゴースト状態を整えるためのものなので、この解除とは
+      // 重複しない。
+      _setMeshGhosted(mesh, false);
       highlightMesh(mesh, true);
       _showMeshOutline(mesh);
     });

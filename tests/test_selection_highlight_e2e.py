@@ -338,9 +338,24 @@ def test_ghost_mode_dims_non_selected_without_bleeding_shared_material(page, sam
     assert is_a_ghosted is False  # 選択中の要素自体はゴーストされない
     assert is_b_ghosted is True
 
-    # Wall Aは選択によりハイライト(emissive)されているはずで、Wall Bのゴースト化
-    # (material差し替え)によってWall A側のマテリアル/選択状態には影響がない。
-    assert _mesh_emissive_hex(page, wall_a) == 0x3355FF
+
+def test_reselecting_a_previously_ghosted_element_still_gets_highlighted(page, same_color_served_url):
+    """コードレビュー指摘の回帰テスト: ゴーストモードがONのまま選択をAからBへ
+    切り替えると、Bはこの瞬間まで非選択(ゴースト済み)だったため
+    mesh.materialが共有の_ghostMaterial(MeshBasicMaterial、emissive無し)を
+    指している。highlightMeshのemissiveガードがこれを見て静かにスキップして
+    しまうと、Bは選択状態(輪郭・ツリー行・プロパティパネル)にはなるのに
+    emissiveハイライトだけが付かない不整合が起きる。"""
+    _wait_for_load(page, same_color_served_url)
+
+    wall_a = _guid_by_name(page, "Wall A")
+    wall_b = _guid_by_name(page, "Wall B")
+
+    page.evaluate("window.ifc2usdViewer.setGhostModeEnabled(true)")
+    page.evaluate(f"window.ifc2usdViewer.selectByGuid({wall_a!r})")  # Bはこの時点でゴースト済み
+    page.evaluate(f"window.ifc2usdViewer.selectByGuid({wall_b!r})")  # AからBへ切り替え
+
+    assert _mesh_emissive_hex(page, wall_b) == 0x3355FF
 
     # ゴーストOFFで元のマテリアルに復元される
     page.evaluate("window.ifc2usdViewer.setGhostModeEnabled(false)")
