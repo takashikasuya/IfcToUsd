@@ -153,8 +153,15 @@ volume fields and analysis display): E5-1 (narrow-band SDF, `sdf.py`) and a scop
 (SDF horizontal-slice overlay, `sdf_slice.py` + `serve --sdf-slices`) are implemented; E5-2
 (UsdVol+OpenVDB output) and full GPU raymarching are blocked on OpenVDB having no
 pip-installable Python bindings in this environment (see the note under Epic E5 in
-`docs/viewer/backlog.md`); E5-4 and Epic E6 are untouched. Consult `docs/viewer/spec.md` before
-extending viewer-related features.
+`docs/viewer/backlog.md`); Epic E6 is untouched. Epic E7 (voxelization/rendering quality) is
+partially done (E7-1 vectorization, E7-3 voxel selection highlight, plus a wireframe toggle);
+E7-2/E7-4 and the voxel-near-black rendering bug (Issue #39) remain open. Two design-only
+epics are specified but not implemented: Epic E8 (viewer UX/design overhaul,
+`docs/viewer/ux-spec.md` — outline highlighting, tree/3D linkage, design tokens) and Epic E9
+(building-OS digital twin mode, `docs/viewer/digital-twin-spec.md` — GUTP Building OS RI
+integration; note the researched fact that its data model carries no IFC GUIDs, so the
+GUID↔point mapping layer is ours; E9-5 is the path that finally implements E5-4). Consult
+`docs/viewer/spec.md` before extending viewer-related features.
 
 ## Out of scope
 

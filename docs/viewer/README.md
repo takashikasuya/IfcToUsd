@@ -13,6 +13,8 @@ USD（`ifc2usd` の出力）と、本リポジトリのボクセル表現（`GLT
 | [blender-omniverse-checklist.md](blender-omniverse-checklist.md) | Blender/Omniverseでの読み込み確認・usdviewとの表示差異記録チェックリスト |
 | [payload-lazy-load-findings.md](payload-lazy-load-findings.md) | 大規模モデルに対するUSD payload遅延ロードの効果検証（計測結果と推奨） |
 | [usd-wasm-webgpu-findings.md](usd-wasm-webgpu-findings.md) | usd-wasm / WebGPU Hydra delegateエコシステムの年次再評価（E6-3、初回2026-07） |
+| [ux-spec.md](ux-spec.md) | ビューワーUX・デザイン改良仕様（Epic E8: ハイライト強化・ツリー連携・デザイントークン等） |
+| [digital-twin-spec.md](digital-twin-spec.md) | ビルOS連携デジタルツイン表示モード仕様（Epic E9: GUTP Building OS RI調査結果・マッピング層・ヒートマップ） |
 
 ## 結論の要約
 
