@@ -242,6 +242,28 @@ def test_shortcut_w_toggles_wireframe(page, served_url):
     assert page.locator("#wireframe-toggle").is_checked() is False
 
 
+def test_modifier_plus_shortcut_key_is_left_to_the_browser(page, served_url):
+    # Ctrl/Cmd+W(タブを閉じる)・Ctrl/Cmd+F(検索)等のブラウザ標準ショートカットを
+    # 奪わないことを確認する(Copilotレビュー指摘、PR #48)。
+    _wait_for_load(page, served_url)
+    guid = _guid_by_name(page, "Wall North")
+    page.evaluate(f"window.ifc2usdViewer.selectByGuid({guid!r})")
+    page.evaluate("""
+        () => {
+            window.ifc2usdViewer.camera.position.set(100, 100, 100);
+            window.ifc2usdViewer.controls.target.set(0, 0, 0);
+        }
+    """)
+    page.locator("#viewport").click(position={"x": 5, "y": 5})
+
+    page.keyboard.press("Control+w")
+    assert page.locator("#wireframe-toggle").is_checked() is False
+
+    page.keyboard.press("Control+f")
+    new_target = page.evaluate("window.ifc2usdViewer.controls.target.toArray()")
+    assert new_target == pytest.approx([0, 0, 0])
+
+
 def test_shortcuts_1_2_3_switch_display_mode(page, served_url):
     _wait_for_load(page, served_url)
 

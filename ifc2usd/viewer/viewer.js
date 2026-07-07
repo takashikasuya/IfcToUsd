@@ -990,6 +990,9 @@ function toggleShortcutsOverlay(force) {
 
 window.addEventListener("keydown", (event) => {
   if (_isTypingTarget(document.activeElement)) return;
+  // 修飾キー付きは常にブラウザ/OS側のショートカット（Ctrl+F検索、Ctrl+Wタブを閉じる等)
+  // に譲る。ここで奪うと該当キーが常時使用不能になる(Copilotレビュー指摘、PR #48)。
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
 
   switch (event.key) {
     case "f":
