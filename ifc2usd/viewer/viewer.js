@@ -17,11 +17,23 @@ const sdfSliceToggle = document.getElementById("sdf-slice-toggle");
 const sdfSliceHeightSlider = document.getElementById("sdf-slice-height-slider");
 const wireframeToggle = document.getElementById("wireframe-toggle");
 const ghostToggle = document.getElementById("ghost-toggle");
+const treePanelToggle = document.getElementById("tree-panel-toggle");
+const propertyPanelToggle = document.getElementById("property-panel-toggle");
+const shortcutsOverlay = document.getElementById("shortcuts-overlay");
 
-const HIGHLIGHT_EMISSIVE = 0x3355ff;
+// デザイントークン(E8-5 / ux-spec.md §3.5): 色はindex.htmlの:rootカスタム
+// プロパティを唯一の定義source とし、ここではgetComputedStyleで初期化時に
+// 1回だけ解決する(index.html側の値を変えるだけでビューワー内の色も揃うように、
+// 二重管理を避ける)。
+function _cssVar(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+const HIGHLIGHT_EMISSIVE = new THREE.Color(_cssVar("--accent", "#3355ff")).getHex();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x202020);
+scene.background = new THREE.Color(_cssVar("--bg", "#202020"));
 
 const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 10000);
 
@@ -942,12 +954,121 @@ ghostToggle.addEventListener("change", () => {
   _applyGhostState();
 });
 
+// パネル開閉(E8-5)。左右パネルの幅をCSSで0にするだけで、#viewportは
+// flex:1のため自動的に広がる。既存のResizeObserver(#viewportを監視)が
+// レイアウト確定後に発火してcamera.aspect/renderer.setSizeを追従させる
+// ため、ここで#viewportのサイズを直接計算する必要はない。
+treePanelToggle.addEventListener("click", () => {
+  const collapsed = treePanel.classList.toggle("collapsed");
+  treePanelToggle.textContent = collapsed ? "›" : "‹";
+});
+
+propertyPanelToggle.addEventListener("click", () => {
+  const collapsed = propertyPanel.classList.toggle("collapsed");
+  propertyPanelToggle.textContent = collapsed ? "‹" : "›";
+});
+
+// キーボードショートカット(E8-5)。input/textarea/contentEditableへ
+// フォーカス中は無効にする(検索ボックス等での通常のタイピングを妨げないため)。
+function _isTypingTarget(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+function _setDisplayModeViaShortcut(mode) {
+  const input = document.querySelector(`input[name="display-mode"][value="${mode}"]`);
+  if (input) input.checked = true;
+  setDisplayMode(mode);
+}
+
+function toggleShortcutsOverlay(force) {
+  const shouldShow = force !== undefined ? force : !shortcutsOverlay.classList.contains("visible");
+  shortcutsOverlay.classList.toggle("visible", shouldShow);
+}
+
+window.addEventListener("keydown", (event) => {
+  if (_isTypingTarget(document.activeElement)) return;
+  // 修飾キー付きは常にブラウザ/OS側のショートカット（Ctrl+F検索、Ctrl+Wタブを閉じる等)
+  // に譲る。ここで奪うと該当キーが常時使用不能になる(Copilotレビュー指摘、PR #48)。
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+  switch (event.key) {
+    case "f":
+    case "F": {
+      const box = selectedGuid !== null ? getBoundingBoxOfGuid(selectedGuid) : modelBoundingBox;
+      fitCameraToBox(box);
+      break;
+    }
+    case "Escape":
+      // ショートカット一覧が開いていればそちらを優先して閉じる(モーダル的挙動)。
+      if (shortcutsOverlay.classList.contains("visible")) {
+        toggleShortcutsOverlay(false);
+      } else {
+        selectByGuid(null);
+      }
+      break;
+    case "w":
+    case "W":
+      wireframeToggle.checked = !wireframeToggle.checked;
+      setWireframeEnabled(wireframeToggle.checked);
+      break;
+    case "1":
+      _setDisplayModeViaShortcut("mesh");
+      break;
+    case "2":
+      _setDisplayModeViaShortcut("voxel");
+      break;
+    case "3":
+      _setDisplayModeViaShortcut("both");
+      break;
+    case "?":
+      toggleShortcutsOverlay();
+      break;
+    default:
+      return; // 対象外のキーはpreventDefaultしない
+  }
+  event.preventDefault();
+});
+
+// v1（ノートブックGLTF_to_Voxel.ipynb形式）→v2変換（spec.md §2の後方互換規定、
+// Issue #17 / E1-5）。Python側のifc2usd.voxel.convert_v1_voxel_jsonと同一の変換
+// （そちらのdocstringに変換規則の詳細）。ビューワー読み込み時にも受け付ける
+// ことで、旧ノートブックの既存出力を手動配置したディレクトリでもそのまま
+// 表示できる。
+function convertV1VoxelJson(v1) {
+  const size = v1.voxelSize;
+  const origin = v1.offset.map((component) => component * size);
+  const elements = (v1.elements || []).map((el) => {
+    const [r, g, b] = mortonDecode(el.color);
+    return {
+      guid: el.guid,
+      class: el.class,
+      name: el.name ?? null,
+      color: [r / 255, g / 255, b / 255],
+      indices: [...el.indices].sort((a, b2) => a - b2),
+    };
+  });
+  return {
+    version: 2,
+    units: "m",
+    upAxis: "Z",
+    source: { convertedFrom: "v1" },
+    origin,
+    lods: [{ size, elements }],
+  };
+}
+
 async function loadVoxels(voxelsUrl) {
   const response = await fetch(voxelsUrl);
   if (!response.ok) {
     throw new Error(`failed to load voxels: ${response.status}`);
   }
-  const voxelDescription = await response.json();
+  let voxelDescription = await response.json();
+  if (voxelDescription.voxelSize !== undefined && voxelDescription.offset !== undefined) {
+    voxelDescription = convertV1VoxelJson(voxelDescription);
+  }
   buildVoxelLods(voxelDescription);
   applyDisplayState();
 }

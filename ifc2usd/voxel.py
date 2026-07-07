@@ -316,6 +316,67 @@ def build_voxel_json(
     }
 
 
+def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
+    """ノートブック形式のボクセルJSON v1をv2スキーマへ変換する（spec.md §2の
+    後方互換規定、Issue #17 / E1-5）。
+
+    v1は `GLTF_to_Voxel.ipynb` が出力する形式:
+    `voxelSize`(一辺スカラー)、`offset`(floor(ワールド最小点/voxelSize)の整数格子
+    座標)、要素ごとの `color`(pymorton.interleave3(R,G,B)、各0-255のMorton符号化
+    整数)、`indices`(offset起点格子のMorton符号)、`metadata`(属性の重複格納)。
+
+    v2への対応:
+    - `origin` = `offset * voxelSize`（ワールド座標, m）。indicesはoffset起点格子の
+      符号のままv2のorigin起点格子と同一の格子を指すため、値の再計算は不要
+      （ソート済み格納の規定のみ適用する）。
+    - Morton符号化された色は morton_decode で(R,G,B)へ復号し、0-1へ正規化する。
+      pymorton.interleave3 はxを最下位ビットに置く規約で、morton_encode/decodeと
+      ビット順が一致する（pymorton実ソースとのランダム化一致テストで確認済み）。
+      なおpymortonは各軸を10bitへマスクする(n &= 0x3ff)ため、正規のv1ファイルの
+      符号は色・空間とも最大2^30-1に収まる。逆に言うと、格子が一辺1024セルを
+      超えたノートブック実行はv1生成時点でエイリアスした壊れたデータを出力して
+      おり、どんな変換でも復元できない（この関数の責任範囲外の既知の制約）。
+    - `metadata` はv2へ持ち込まない（spec.md §2: 属性はGUIDでUSD/scene.json側を
+      参照し、JSONへ重複格納しない）。
+    - v1自身は座標系情報を持たない（ノートブックはglTFシーンをそのまま
+      ボクセル化しており上軸はソース依存）ため、up_axisは呼び出し側指定とする。
+
+    Raises:
+        ValueError: v1形式のマーカー（voxelSize/offset）を持たない入力の場合。
+    """
+    if "voxelSize" not in v1 or "offset" not in v1:
+        raise ValueError(
+            "not a v1 voxel JSON (missing 'voxelSize'/'offset'); "
+            "v2 files need no conversion"
+        )
+
+    size = v1["voxelSize"]
+    offset = v1["offset"]
+    origin = [component * size for component in offset]
+
+    elements = []
+    for el in v1.get("elements", []):
+        r, g, b = morton_decode(el["color"])
+        elements.append(
+            {
+                "guid": el["guid"],
+                "class": el["class"],
+                "name": el.get("name"),
+                "color": [r / 255, g / 255, b / 255],
+                "indices": sorted(el["indices"]),
+            }
+        )
+
+    return {
+        "version": _JSON_VERSION,
+        "units": _UNITS,
+        "upAxis": up_axis,
+        "source": {"generator": "ifc2usd convert_v1_voxel_json", "convertedFrom": "v1"},
+        "origin": origin,
+        "lods": [{"size": size, "elements": elements}],
+    }
+
+
 def _variant_name(size: float) -> str:
     return f"size_{size}".replace(".", "_")
 

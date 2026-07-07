@@ -6,28 +6,52 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="data:," />
     <style>
-      html, body { margin: 0; height: 100%; background: #202020; color: #eee; font-family: sans-serif; }
+      /* デザイントークン(E8-5 / ux-spec.md §3.5)。色・余白・角丸をここへ集約する。
+         viewer.js側のハードコード色(scene.background、選択ハイライト色)も
+         getComputedStyleで--bg/--accentを読み取って揃える(index.htmlとviewer.js
+         で色の定義が二重化しないようにするため)。 */
+      :root {
+        --bg: #202020;
+        --bg-panel: #1c1c1c;
+        --bg-control: #2a2a2a;
+        --bg-control-hover: #3a3a3a;
+        --border: #444;
+        --text: #eee;
+        --text-dim: #999;
+        --accent: #3355ff;
+        --radius: 3px;
+        --space-1: 4px;
+        --space-2: 8px;
+        --space-3: 12px;
+      }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: sans-serif; }
       #app { display: flex; height: 100%; }
-      #tree-panel { width: 280px; overflow-y: auto; border-right: 1px solid #444; padding: 8px; box-sizing: border-box; font-size: 13px; }
+      #tree-panel {
+        width: 280px; overflow-y: auto; border-right: 1px solid var(--border);
+        padding: var(--space-2); box-sizing: border-box; font-size: 13px; background: var(--bg-panel);
+        transition: width 0.15s ease;
+      }
+      #tree-panel.collapsed { width: 0; padding: 0; border: none; overflow: hidden; }
       #tree-search-input {
-        width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 4px 6px;
-        background: #2a2a2a; border: 1px solid #444; color: #eee; border-radius: 3px; font-size: 12px;
+        width: 100%; box-sizing: border-box; margin-bottom: var(--space-1); padding: var(--space-1) var(--space-2);
+        background: var(--bg-control); border: 1px solid var(--border); color: var(--text);
+        border-radius: var(--radius); font-size: 12px;
       }
       #tree-panel ul { list-style: none; margin: 0; padding-left: 16px; }
       #tree-panel ul.tree-root { padding-left: 0; }
       #tree-panel li { padding: 2px 0; }
       #tree-panel li.search-hidden { display: none; }
       #tree-panel .tree-row { display: flex; align-items: center; gap: 2px; }
-      #tree-panel .tree-toggle { width: 14px; flex: none; text-align: center; cursor: pointer; user-select: none; color: #888; }
+      #tree-panel .tree-toggle { width: 14px; flex: none; text-align: center; cursor: pointer; user-select: none; color: var(--text-dim); }
       #tree-panel .tree-toggle-empty { cursor: default; }
       #tree-panel .tree-color-chip { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
       #tree-panel .tree-label {
-        cursor: pointer; padding: 1px 4px; border-radius: 3px; flex: 1; min-width: 0;
+        cursor: pointer; padding: 1px var(--space-1); border-radius: var(--radius); flex: 1; min-width: 0;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       #tree-panel .tree-label:hover { background: #333; }
       #tree-panel li.hovered > .tree-row > .tree-label { background: #2a355c; }
-      #tree-panel li.selected > .tree-row > .tree-label { background: #3355ff; color: #fff; }
+      #tree-panel li.selected > .tree-row > .tree-label { background: var(--accent); color: #fff; }
       #tree-panel mark.tree-match { background: #665c00; color: inherit; border-radius: 2px; }
       #tree-panel .tree-isolate-btn {
         visibility: hidden; flex: none; background: none; border: none; color: #aaa;
@@ -35,33 +59,70 @@
       }
       #tree-panel .tree-row:hover .tree-isolate-btn { visibility: visible; }
       #tree-panel li.isolated > .tree-row > .tree-isolate-btn { visibility: visible; color: #6cf; }
+
+      .panel-toggle {
+        flex: none; width: 14px; background: var(--bg-panel); border: none; color: var(--text-dim);
+        cursor: pointer; font-size: 11px; padding: 0;
+      }
+      .panel-toggle:hover { background: var(--bg-control-hover); color: var(--text); }
+      #tree-panel-toggle { border-right: 1px solid var(--border); }
+      #property-panel-toggle { border-left: 1px solid var(--border); }
+
       #viewport { flex: 1; position: relative; }
       #viewport canvas { display: block; width: 100%; height: 100%; }
-      #property-panel { width: 300px; overflow-y: auto; border-left: 1px solid #444; padding: 8px; box-sizing: border-box; }
-      #property-panel .property-guide { color: #888; font-size: 13px; }
+
+      #property-panel {
+        width: 300px; overflow-y: auto; border-left: 1px solid var(--border);
+        padding: var(--space-2); box-sizing: border-box; background: var(--bg-panel);
+        transition: width 0.15s ease;
+      }
+      #property-panel.collapsed { width: 0; padding: 0; border: none; overflow: hidden; }
+      #property-panel .property-guide { color: var(--text-dim); font-size: 13px; }
       #property-panel dl { margin: 0; font-size: 13px; }
-      #property-panel dt { color: #999; margin-top: 8px; font-size: 11px; text-transform: uppercase; }
+      #property-panel dt { color: var(--text-dim); margin-top: var(--space-2); font-size: 11px; text-transform: uppercase; }
       #property-panel dd { margin: 2px 0 0 0; display: flex; align-items: center; gap: 6px; }
       #property-panel .property-class-chip { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; background: #666; }
       #property-panel .property-guid-text { overflow-wrap: anywhere; }
       #property-panel .property-copy-btn {
-        flex: none; background: #2a2a2a; border: 1px solid #444; color: #ccc;
-        border-radius: 3px; font-size: 11px; padding: 1px 6px; cursor: pointer;
+        flex: none; background: var(--bg-control); border: 1px solid var(--border); color: #ccc;
+        border-radius: var(--radius); font-size: 11px; padding: 1px 6px; cursor: pointer;
       }
-      #property-panel .property-copy-btn:hover { background: #3a3a3a; }
+      #property-panel .property-copy-btn:hover { background: var(--bg-control-hover); }
+
       #display-controls {
-        position: absolute; top: 8px; left: 8px; z-index: 5;
+        position: absolute; top: var(--space-2); left: var(--space-2); z-index: 5;
         /* 絶対配置なので通常フローの幅に従わない。狭いビューポートでは折り返し
            無しだと隣の#property-panelへ重なってしまう(E8-4で発覚)ため、
-           #viewport自身の幅までで折り返す。ツールバーそのものの再設計(グループ化・
-           折りたたみ)はE8-5のスコープ。 */
-        max-width: calc(100% - 16px); flex-wrap: wrap; row-gap: 6px;
-        background: rgba(32, 32, 32, 0.85); border: 1px solid #444; border-radius: 4px;
-        padding: 6px 8px; font-size: 12px; display: flex; align-items: center; gap: 12px;
+           #viewport自身の幅までで折り返す。折り返して複数行になり得るため、
+           固定位置の他の重なり要素(#shortcuts-overlay等)は上下方向で衝突
+           しない配置にする必要がある(E8-5コードレビューで判明)。 */
+        max-width: calc(100% - 16px); flex-wrap: wrap; row-gap: var(--space-2);
+        background: rgba(32, 32, 32, 0.85); border: 1px solid var(--border); border-radius: 4px;
+        padding: 6px var(--space-2); font-size: 12px; display: flex; align-items: center; gap: var(--space-3);
       }
-      #display-controls fieldset { border: none; margin: 0; padding: 0; display: flex; gap: 8px; }
+      #display-controls fieldset { border: none; margin: 0; padding: 0; display: flex; gap: var(--space-2); }
       #display-controls legend { display: none; }
       #display-controls label { cursor: pointer; }
+      .toolbar-group { display: flex; align-items: center; gap: var(--space-2); }
+      .toolbar-group-label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 2px; }
+      .toolbar-divider { width: 1px; align-self: stretch; background: var(--border); flex: none; }
+
+      #shortcuts-overlay {
+        /* #display-controls(左上起点、flex-wrapで折り返す)は狭い幅では
+           ほぼビューポート全幅まで伸びうる(E8-4で判明)。オーバーレイを
+           top/leftの隅に固定すると、ツールバーが折り返して縦に伸びた場合に
+           重なってしまう(コードレビューで検出)。ツールバーの高さに関わらず
+           絶対に衝突しないよう、ビューポート中央に配置する。
+        */
+        display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10;
+        background: rgba(20, 20, 20, 0.95); border: 1px solid var(--border); border-radius: 4px;
+        padding: var(--space-3); font-size: 12px; max-width: 260px;
+      }
+      #shortcuts-overlay.visible { display: block; }
+      #shortcuts-overlay h2 { font-size: 12px; margin: 0 0 var(--space-2) 0; color: var(--text-dim); text-transform: uppercase; }
+      #shortcuts-overlay dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-2); }
+      #shortcuts-overlay dt { font-family: monospace; background: var(--bg-control); border-radius: var(--radius); padding: 0 var(--space-1); }
+      #shortcuts-overlay dd { margin: 0; }
     </style>
     <script type="importmap">
       {
@@ -79,33 +140,51 @@
         <input type="text" id="tree-search-input" placeholder="Search name / class / GUID" aria-label="Tree search" />
         <div id="tree-nodes"></div>
       </div>
+      <button type="button" id="tree-panel-toggle" class="panel-toggle" title="Toggle tree panel">‹</button>
       <div id="viewport">
         <div id="display-controls">
-          <fieldset id="display-mode-controls">
-            <legend>Display mode</legend>
-            <label><input type="radio" name="display-mode" value="mesh" /> Mesh</label>
-            <label><input type="radio" name="display-mode" value="voxel" /> Voxel</label>
-            <label><input type="radio" name="display-mode" value="both" checked /> Both</label>
-          </fieldset>
-          <select id="voxel-lod-select" aria-label="Voxel LOD"></select>
-          <label>
-            <input type="checkbox" id="wireframe-toggle" /> Wireframe
-          </label>
-          <label>
-            <input type="checkbox" id="ghost-toggle" /> Ghost
-          </label>
-          <label>
-            Section
-            <input type="range" id="section-height-slider" aria-label="Section height" disabled />
-          </label>
-          <label>
-            <input type="checkbox" id="sdf-slice-toggle" disabled /> SDF slice
-          </label>
-          <label>
-            <input type="range" id="sdf-slice-height-slider" aria-label="SDF slice height" disabled />
-          </label>
+          <div class="toolbar-group" title="Display: mesh/voxel visibility and rendering mode">
+            <span class="toolbar-group-label">Display</span>
+            <fieldset id="display-mode-controls" title="Which geometry to render">
+              <legend>Display mode</legend>
+              <label title="Show only the glTF mesh"><input type="radio" name="display-mode" value="mesh" /> Mesh</label>
+              <label title="Show only the voxel representation"><input type="radio" name="display-mode" value="voxel" /> Voxel</label>
+              <label title="Show both mesh and voxels"><input type="radio" name="display-mode" value="both" checked /> Both</label>
+            </fieldset>
+            <select id="voxel-lod-select" aria-label="Voxel LOD" title="Voxel level of detail"></select>
+            <label title="Render as wireframe instead of filled"><input type="checkbox" id="wireframe-toggle" /> Wireframe</label>
+            <label title="Dim non-selected elements"><input type="checkbox" id="ghost-toggle" /> Ghost</label>
+          </div>
+          <div class="toolbar-divider"></div>
+          <div class="toolbar-group" title="Analysis: section clipping and SDF slice overlay">
+            <span class="toolbar-group-label">Analysis</span>
+            <label title="Horizontal clip height">
+              Section
+              <input type="range" id="section-height-slider" aria-label="Section height" title="Horizontal clip height" disabled />
+            </label>
+            <label title="Show signed-distance-field slice overlay for the selected element">
+              <input type="checkbox" id="sdf-slice-toggle" disabled /> SDF slice
+            </label>
+            <input type="range" id="sdf-slice-height-slider" aria-label="SDF slice height" title="SDF slice height" disabled />
+          </div>
+        </div>
+        <div id="shortcuts-overlay">
+          <h2>Keyboard shortcuts</h2>
+          <dl>
+            <dt>F</dt>
+            <dd>Fit to selection (or all)</dd>
+            <dt>Esc</dt>
+            <dd>Deselect / close this overlay</dd>
+            <dt>W</dt>
+            <dd>Toggle wireframe</dd>
+            <dt>1 / 2 / 3</dt>
+            <dd>Mesh / Voxel / Both</dd>
+            <dt>?</dt>
+            <dd>Toggle this overlay</dd>
+          </dl>
         </div>
       </div>
+      <button type="button" id="property-panel-toggle" class="panel-toggle" title="Toggle property panel">›</button>
       <div id="property-panel"></div>
     </div>
     <script type="module" src="./viewer.js"></script>
