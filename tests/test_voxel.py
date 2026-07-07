@@ -15,7 +15,13 @@ import numpy as np
 import pytest
 import trimesh
 
-from ifc2usd.voxel import morton_decode, morton_encode, voxelize_mesh
+from ifc2usd.voxel import (
+    decode_morton_indices,
+    encode_morton_indices,
+    morton_decode,
+    morton_encode,
+    voxelize_mesh,
+)
 from tests.conftest import wall_mesh_path, world_mesh
 
 
@@ -41,6 +47,35 @@ def test_morton_encode_is_injective_over_small_range():
 def test_morton_rejects_negative_coordinates():
     with pytest.raises(ValueError):
         morton_encode(-1, 0, 0)
+
+
+# --- Morton索引配列の delta+RLE 符号化（Issue #38 / E7-4） ---
+
+
+def test_encode_decode_morton_indices_round_trip():
+    codes = sorted({morton_encode(x, y, z) for x in range(4) for y in range(4) for z in range(4)})
+    encoded = encode_morton_indices(codes)
+    assert decode_morton_indices(encoded) == codes
+
+
+def test_encode_morton_indices_of_empty_list():
+    encoded = encode_morton_indices([])
+    assert encoded == {"base": None, "deltas": []}
+    assert decode_morton_indices(encoded) == []
+
+
+def test_encode_morton_indices_of_single_code():
+    encoded = encode_morton_indices([42])
+    assert encoded == {"base": 42, "deltas": []}
+    assert decode_morton_indices(encoded) == [42]
+
+
+def test_encode_morton_indices_runs_repeated_equal_deltas():
+    # 1, 3, 5, 7, 9 -> deltaは全て2 -> 1回のrunにまとまる
+    codes = [1, 3, 5, 7, 9]
+    encoded = encode_morton_indices(codes)
+    assert encoded == {"base": 1, "deltas": [[2, 4]]}
+    assert decode_morton_indices(encoded) == codes
 
 
 # --- 表面占有ボクセル化 ---
@@ -142,6 +177,57 @@ def test_voxelize_fill_of_grid_aligned_cube_fills_interior():
 
     assert len(surface) == 64 - 8  # 中空シェル
     assert len(filled) == 64  # 内部充填で全セル
+
+
+# --- Issue #36 (E7-2): 非watertightメッシュへの頑健化 ---
+
+
+def _open_box_missing_one_face(extents, translation) -> tuple[list, list]:
+    """weld-vertices=False を模しつつ、上面（法線 +Z）の2三角形を除去した
+    真に穴（境界エッジ）を持つ箱。"""
+    box = trimesh.creation.box(extents=extents)
+    box.apply_translation(translation)
+    keep = ~np.all(np.isclose(box.face_normals, [0.0, 0.0, 1.0]), axis=1)
+    faces = box.faces[keep]
+    verts = box.vertices[faces].reshape(-1, 3)
+    indices = np.arange(len(verts))
+    return verts.tolist(), indices.tolist()
+
+
+def test_voxelize_fill_is_robust_to_touching_non_manifold_bodies():
+    """接触する2つの立方体（weld-vertices=False で頂点非共有のため、接触面が
+    二重に存在し非多様体エッジとなる形状）でも、フラッドフィルは各立方体の
+    内部を正しく充填する。実データ(files/ToyodaLab.ifc)のIfcFurnishingElement/
+    IfcBuildingElementProxyで見られる、複数ボディが接触する非多様体形状の
+    再現（真の穴＝境界エッジは持たない）。trimeshのcontains()によるレイキャスト
+    parity判定は、この種の非多様体形状でレイ方向依存の誤判定を起こし得るが、
+    フラッドフィルは表面ボクセルシェルの隙間の有無のみに依存するため頑健。"""
+    verts_a, indices_a = _duplicated_vertex_box([1.0, 1.0, 1.0], [0.5, 0.5, 0.5])
+    verts_b, indices_b = _duplicated_vertex_box([1.0, 1.0, 1.0], [1.5, 0.5, 0.5])
+    offset = len(verts_a)
+    vertices = verts_a + verts_b
+    indices = indices_a + [i + offset for i in indices_b]
+    size = 0.25  # 立方体1個あたり4x4x4=64セル(内部8セル)、合計8x4x4=128セル
+
+    _, surface = voxelize_mesh(vertices, indices, size)
+    _, filled = voxelize_mesh(vertices, indices, size, fill=True)
+
+    assert len(surface) == (64 - 8) * 2
+    assert len(filled) == 128
+
+
+def test_voxelize_fill_of_box_missing_one_face_leaves_interior_unfilled():
+    """真の穴（境界エッジ）を持つ形状（上面が欠損した箱）では、外部フラッド
+    フィルがその穴から内部へ「漏れる」ため内部は充填されない。これは頑健性の
+    欠如ではなく、そもそも閉じていない形状に対する妥当な結果であり、
+    Issue #36 / E7-2 の既知の限界として明示的にテストする。"""
+    vertices, indices = _open_box_missing_one_face([1.0, 1.0, 1.0], [0.5, 0.5, 0.5])
+    size = 0.25
+
+    _, surface = voxelize_mesh(vertices, indices, size)
+    _, filled = voxelize_mesh(vertices, indices, size, fill=True)
+
+    assert filled == surface
 
 
 # --- 入力検証 ---

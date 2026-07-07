@@ -10,7 +10,7 @@ from playwright.sync_api import sync_playwright
 
 from ifc2usd import convert
 from ifc2usd.serve import build_serve_directory, make_server
-from ifc2usd.voxel import morton_decode
+from ifc2usd.voxel import decode_morton_indices, encode_morton_indices, morton_decode, morton_encode
 from tests.conftest import chromium_launch_kwargs
 
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal.ifc"
@@ -87,7 +87,7 @@ def test_voxel_instance_positions_match_origin_plus_index_times_size(page, serve
 
     expected = set()
     for el in lod["elements"]:
-        for code in el["indices"]:
+        for code in decode_morton_indices(el["indices"]):
             ix, iy, iz = morton_decode(code)
             expected.add(
                 (
@@ -143,6 +143,32 @@ def test_morton_decode_matches_python_reference_across_fast_and_bigint_paths(pag
         js_literal = f"{code}n" if code > (2**53 - 1) else str(code)
         actual = page.evaluate(f"window.ifc2usdViewer.mortonDecode({js_literal})")
         assert actual == expected, f"code={code}"
+
+
+def test_decode_morton_indices_matches_python_reference(page, served_url):
+    """viewer.jsのdecodeMortonIndicesは、Python側encode_morton_indices/
+    decode_morton_indices（Issue #38 / E7-4）と同一のdelta+RLE符号を復元できる
+    こと、および素朴な配列（v2互換ファイル・v1変換時の出力）もそのまま
+    透過的に扱えることを確認する。"""
+    _wait_for_load(page, served_url)
+
+    codes = sorted({morton_encode(x, y, z) for x in range(3) for y in range(3) for z in range(3)})
+    encoded = encode_morton_indices(codes)
+
+    decoded_encoded = page.evaluate(
+        "(encoded) => window.ifc2usdViewer.decodeMortonIndices(encoded)", encoded
+    )
+    assert decoded_encoded == codes
+
+    decoded_plain_array = page.evaluate(
+        "(arr) => window.ifc2usdViewer.decodeMortonIndices(arr)", codes
+    )
+    assert decoded_plain_array == codes
+
+    assert page.evaluate(
+        "(encoded) => window.ifc2usdViewer.decodeMortonIndices(encoded)",
+        {"base": None, "deltas": []},
+    ) == []
 
 
 def test_voxel_instance_colors_match_element_color(page, served_url):
@@ -243,8 +269,6 @@ def test_v1_voxels_json_is_converted_and_rendered(browser, tmp_path):
     ボクセルJSON(voxelSize/offset/Morton符号化色)を配信ディレクトリへ手動配置
     しても、ビューワーが読み込み時にv2へ変換して表示できる。"""
     import json as json_module
-
-    from ifc2usd.voxel import morton_encode
 
     server, thread, url, workdir = _serve(tmp_path, "www_v1_voxels")
     try:

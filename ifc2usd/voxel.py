@@ -2,23 +2,20 @@
 
 `docs/viewer/spec.md` §1.1, §2 に対応する。ボクセル化はメッシュの表面（既定）
 または内部充填（``fill=True``）を占有格子（``origin`` からの整数インデックス
-``(ix, iy, iz)``）として返す。占有判定は自前実装（各三角形のAABBを占有格子へ
-展開する方式）で行い、内部充填のみ trimesh の point-in-mesh 判定を利用する。
-Morton符号化はビット桁のインタリーブによる自前実装。
+``(ix, iy, iz)``）として返す。占有判定・内部充填とも自前実装（占有格子上の
+幾何演算のみで、trimeshのpoint-in-mesh判定には依存しない。Issue #36 / E7-2
+参照）。Morton符号化はビット桁のインタリーブによる自前実装。
 """
 
 from __future__ import annotations
 
-import logging
+from collections import deque
 from typing import NamedTuple, Optional, Sequence
 
 import numpy as np
-import trimesh
 from pxr import Gf, Sdf, Usd, UsdGeom
 
-logger = logging.getLogger("ifc2usd")
-
-_JSON_VERSION = 2
+_JSON_VERSION = 3  # v3: indicesがdelta+RLE符号化された形式（Issue #38 / E7-4）
 _UNITS = "m"
 
 
@@ -60,6 +57,47 @@ def morton_decode(code: int) -> tuple[int, int, int]:
         z |= ((code >> (3 * i + 2)) & 1) << i
         i += 1
     return x, y, z
+
+
+def encode_morton_indices(sorted_codes: Sequence[int]) -> dict:
+    """ソート済みMortonコード列をdelta + run-length符号化する（Issue #38 / E7-4）。
+
+    spec.md §2はvoxels.jsonの`indices`をソート済みで格納する規定のため、隣接する
+    差分（delta）は小さい値・同じ値の繰り返しになりやすい（特に規則的な間隔で
+    並ぶボクセル格子）。差分を取ったうえで同じ値が連続する区間をrun-length化
+    することで、素朴な整数リストよりJSON出力サイズを削減できる。
+
+    Returns:
+        ``{"base": 先頭コード, "deltas": [[delta, 連続回数], ...]}``。
+        空リストの場合は ``{"base": None, "deltas": []}``。
+    """
+    if not sorted_codes:
+        return {"base": None, "deltas": []}
+
+    base = sorted_codes[0]
+    runs: list[list[int]] = []
+    prev = base
+    for code in sorted_codes[1:]:
+        delta = code - prev
+        if runs and runs[-1][0] == delta:
+            runs[-1][1] += 1
+        else:
+            runs.append([delta, 1])
+        prev = code
+    return {"base": base, "deltas": runs}
+
+
+def decode_morton_indices(encoded: dict) -> list[int]:
+    """`encode_morton_indices` の逆変換。"""
+    base = encoded.get("base")
+    if base is None:
+        return []
+
+    codes = [base]
+    for delta, count in encoded.get("deltas", []):
+        for _ in range(count):
+            codes.append(codes[-1] + delta)
+    return codes
 
 
 def _snap_to_integer(value: np.ndarray, tol: float = 1e-9) -> np.ndarray:
@@ -157,10 +195,63 @@ def _surface_voxels(
     return voxels
 
 
-def _fill_voxels(
-    mesh: trimesh.Trimesh, surface: set[tuple[int, int, int]], size: float, origin: np.ndarray
+_FLOOD_FILL_NEIGHBORS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+
+
+def _exterior_voxels(
+    surface: set[tuple[int, int, int]], lo: tuple[int, int, int], hi: tuple[int, int, int]
 ) -> set[tuple[int, int, int]]:
-    """surface のAABB範囲内で、中心点がメッシュ内部にあるセルを追加する。"""
+    """surface を壁とみなし、[lo, hi] を1セル分外側へ広げた領域の隅から6方向
+    （面隣接）フラッドフィルで到達できるセル集合を返す（外部判定）。"""
+    padded_lo = (lo[0] - 1, lo[1] - 1, lo[2] - 1)
+    padded_hi = (hi[0] + 1, hi[1] + 1, hi[2] + 1)
+
+    start = padded_lo
+    exterior = {start}
+    queue = deque([start])
+    while queue:
+        cx, cy, cz = queue.popleft()
+        for dx, dy, dz in _FLOOD_FILL_NEIGHBORS:
+            neighbor = (cx + dx, cy + dy, cz + dz)
+            if not (
+                padded_lo[0] <= neighbor[0] <= padded_hi[0]
+                and padded_lo[1] <= neighbor[1] <= padded_hi[1]
+                and padded_lo[2] <= neighbor[2] <= padded_hi[2]
+            ):
+                continue
+            if neighbor in exterior or neighbor in surface:
+                continue
+            exterior.add(neighbor)
+            queue.append(neighbor)
+    return exterior
+
+
+def _fill_voxels(surface: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
+    """surface のAABB範囲内で、外部から6方向フラッドフィルで到達できないセルを
+    内部として追加する（Issue #36 / E7-2）。
+
+    以前は `trimesh.Trimesh.contains()`（レイキャストによるparity判定）に
+    依存していたが、`ifc.py` が `weld-vertices=False` で読み込むため各面が
+    独自の頂点を持ち、`trimesh` の水密性チェック（頂点インデックスに基づく辺の
+    共有判定）は常にFalseになる。実データ(`files/ToyodaLab.ifc`)で調査した
+    ところ、この非水密判定は要素の71%で発生するが、実際に真の穴（境界エッジ、
+    1つの面にしか属さない辺）を持つのは元々中空/薄板形状で「内部」概念自体が
+    無いIfcWindow/IfcDoorのみで、構造要素（IfcWallStandardCase/IfcColumn/
+    IfcSlab）は全て水密、IfcFurnishingElement/IfcBuildingElementProxyは複数の
+    ボディが接触する非多様体エッジ（1つの辺に3つ以上の面が集まる）を持つが
+    境界エッジは0（=真の穴は無い）と判明した。
+
+    フラッドフィルは表面ボクセルシェルに隙間があるかどうかだけに依存し、
+    メッシュの位相的水密性やレイキャストparityの数値的不安定性に一切左右
+    されないため、この種の「位相チェック上は非水密だが幾何学的には閉じている」
+    ケースに頑健。
+
+    既知の限界: 表面ボクセル化が実際に隙間を持つ場合（境界エッジがある形状、
+    IfcWindow等）、外部フラッドフィルがその隙間から内部へ「漏れる」ため、
+    その要素の内部は充填されない（surfaceのまま）。これは頑健性の欠如では
+    なく、そもそも閉じていない形状に対する妥当な結果である
+    （tests/test_voxel.pyで再現・検証済み）。
+    """
     if not surface:
         return set(surface)
 
@@ -170,20 +261,15 @@ def _fill_voxels(
     lo = (min(xs), min(ys), min(zs))
     hi = (max(xs), max(ys), max(zs))
 
-    candidates = [
-        (ix, iy, iz)
-        for ix in range(lo[0], hi[0] + 1)
-        for iy in range(lo[1], hi[1] + 1)
-        for iz in range(lo[2], hi[2] + 1)
-        if (ix, iy, iz) not in surface
-    ]
-    if not candidates:
-        return set(surface)
+    exterior = _exterior_voxels(surface, lo, hi)
 
-    centers = origin + (np.array(candidates) + 0.5) * size
-    inside = mesh.contains(centers)
     filled = set(surface)
-    filled.update(idx for idx, is_inside in zip(candidates, inside) if is_inside)
+    for ix in range(lo[0], hi[0] + 1):
+        for iy in range(lo[1], hi[1] + 1):
+            for iz in range(lo[2], hi[2] + 1):
+                cell = (ix, iy, iz)
+                if cell not in surface and cell not in exterior:
+                    filled.add(cell)
     return filled
 
 
@@ -201,7 +287,8 @@ def voxelize_mesh(
         indices: 三角形の頂点インデックス（flat, 3個ずつ組）。
         size: ボクセル一辺の長さ（m）。
         origin: ボクセル格子原点（ワールド座標）。省略時はメッシュのAABB最小点。
-        fill: True の場合、表面占有に加えて内部（trimeshのcontains判定）も占有とする。
+        fill: True の場合、表面占有に加えて内部（外部フラッドフィルで到達不能な
+            セル）も占有とする。
 
     Returns:
         (使用した origin, 占有格子インデックス (ix, iy, iz) の集合)
@@ -232,16 +319,7 @@ def voxelize_mesh(
     surface = _surface_voxels(verts, triangles, size, origin_arr)
 
     if fill:
-        # process=True（既定）で頂点溶接・退化面除去を行う。ifc.py は
-        # weld-vertices=False で法線を保持するため、各面が独自の頂点を持ち
-        # 未処理では非水密メッシュとなり mesh.contains() が信頼できない。
-        mesh = trimesh.Trimesh(vertices=verts, faces=triangles)
-        if not mesh.is_watertight:
-            logger.warning(
-                "voxelize_mesh: mesh is not watertight after processing; "
-                "fill=True interior detection may be unreliable"
-            )
-        occupied = _fill_voxels(mesh, surface, size, origin_arr)
+        occupied = _fill_voxels(surface)
     else:
         occupied = surface
 
@@ -272,14 +350,16 @@ def build_voxel_json(
     up_axis: str = "Z",
     fill: bool = False,
 ) -> dict:
-    """`docs/viewer/spec.md` §2 のボクセル JSON v2 を構築する。
+    """`docs/viewer/spec.md` §2 のボクセル JSON（v3）を構築する。
 
     全要素・全LODで共有する単一の `origin`（シーン全体のワールドAABB最小点）を
     用いるため、`origin + index*size` はどの要素・どのLODでも同じワールド座標系
     に一致する。頂点を持たない要素は出力から除外する。ボクセル化した結果
-    占有ボクセルが0個になった要素は、`indices: []` として出力する（他のLODには
-    出現するのにこのLODでは要素自体が消えてしまうと、ビューワー側で「このLODに
-    存在しない」のか「存在するが空」なのか区別できなくなるため）。
+    占有ボクセルが0個になった要素は、`indices` を空（`encode_morton_indices([])`）
+    として出力する（他のLODには出現するのにこのLODでは要素自体が消えてしまうと、
+    ビューワー側で「このLODに存在しない」のか「存在するが空」なのか区別できなく
+    なるため）。`indices` は素朴な整数リストではなく `encode_morton_indices` に
+    よるdelta+RLE符号化（Issue #38 / E7-4、大規模モデルでのJSON出力サイズ削減）。
     """
     origin = scene_origin(elements)
 
@@ -301,7 +381,7 @@ def build_voxel_json(
                     "class": el.cls,
                     "name": el.name,
                     "color": list(el.color),
-                    "indices": indices,
+                    "indices": encode_morton_indices(indices),
                 }
             )
         lods.append({"size": size, "elements": lod_elements})
@@ -317,7 +397,7 @@ def build_voxel_json(
 
 
 def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
-    """ノートブック形式のボクセルJSON v1をv2スキーマへ変換する（spec.md §2の
+    """ノートブック形式のボクセルJSON v1を現行スキーマへ変換する（spec.md §2の
     後方互換規定、Issue #17 / E1-5）。
 
     v1は `GLTF_to_Voxel.ipynb` が出力する形式:
@@ -325,10 +405,10 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
     座標)、要素ごとの `color`(pymorton.interleave3(R,G,B)、各0-255のMorton符号化
     整数)、`indices`(offset起点格子のMorton符号)、`metadata`(属性の重複格納)。
 
-    v2への対応:
+    現行スキーマへの対応:
     - `origin` = `offset * voxelSize`（ワールド座標, m）。indicesはoffset起点格子の
-      符号のままv2のorigin起点格子と同一の格子を指すため、値の再計算は不要
-      （ソート済み格納の規定のみ適用する）。
+      符号のまま現行スキーマのorigin起点格子と同一の格子を指すため、値の再計算は
+      不要（ソート後 `encode_morton_indices` で符号化するのみ）。
     - Morton符号化された色は morton_decode で(R,G,B)へ復号し、0-1へ正規化する。
       pymorton.interleave3 はxを最下位ビットに置く規約で、morton_encode/decodeと
       ビット順が一致する（pymorton実ソースとのランダム化一致テストで確認済み）。
@@ -336,8 +416,8 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
       符号は色・空間とも最大2^30-1に収まる。逆に言うと、格子が一辺1024セルを
       超えたノートブック実行はv1生成時点でエイリアスした壊れたデータを出力して
       おり、どんな変換でも復元できない（この関数の責任範囲外の既知の制約）。
-    - `metadata` はv2へ持ち込まない（spec.md §2: 属性はGUIDでUSD/scene.json側を
-      参照し、JSONへ重複格納しない）。
+    - `metadata` は現行スキーマへ持ち込まない（spec.md §2: 属性はGUIDでUSD/scene.json
+      側を参照し、JSONへ重複格納しない）。
     - v1自身は座標系情報を持たない（ノートブックはglTFシーンをそのまま
       ボクセル化しており上軸はソース依存）ため、up_axisは呼び出し側指定とする。
 
@@ -363,7 +443,7 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
                 "class": el["class"],
                 "name": el.get("name"),
                 "color": [r / 255, g / 255, b / 255],
-                "indices": sorted(el["indices"]),
+                "indices": encode_morton_indices(sorted(el["indices"])),
             }
         )
 

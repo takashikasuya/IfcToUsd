@@ -809,6 +809,22 @@ function mortonDecode(code) {
 
 const _voxelUnitBox = new THREE.BoxGeometry(1, 1, 1);
 
+// voxels.json v3の`indices`はdelta+RLE符号化された{base, deltas}形式（Issue #38 /
+// E7-4、ifc2usd.voxel.encode_morton_indicesと対）。素朴な配列（v2互換ファイルや
+// convertV1VoxelJsonの出力）はそのまま返し、両形式を透過的に扱う。
+function decodeMortonIndices(indices) {
+  if (Array.isArray(indices)) return indices;
+  const codes = [];
+  if (indices.base === null || indices.base === undefined) return codes;
+  codes.push(indices.base);
+  for (const [delta, count] of indices.deltas ?? []) {
+    for (let i = 0; i < count; i++) {
+      codes.push(codes[codes.length - 1] + delta);
+    }
+  }
+  return codes;
+}
+
 function buildVoxelLods(voxelDescription) {
   const origin = voxelDescription.origin;
   const matrix = new THREE.Matrix4();
@@ -826,7 +842,8 @@ function buildVoxelLods(voxelDescription) {
 
   for (const lod of voxelDescription.lods) {
     const size = lod.size;
-    const totalInstances = lod.elements.reduce((sum, el) => sum + el.indices.length, 0);
+    const elementCodes = lod.elements.map((el) => decodeMortonIndices(el.indices));
+    const totalInstances = elementCodes.reduce((sum, codes) => sum + codes.length, 0);
 
     // vertexColors:trueは指定しない: three.jsはInstancedMesh.instanceColorによる
     // per-instance色(USE_INSTANCING_COLOR)をmaterial.vertexColorsの値と無関係に
@@ -840,9 +857,9 @@ function buildVoxelLods(voxelDescription) {
     const instanceGuids = new Array(totalInstances);
 
     let instanceIndex = 0;
-    for (const el of lod.elements) {
+    lod.elements.forEach((el, elIndex) => {
       color.setRGB(el.color[0], el.color[1], el.color[2]);
-      for (const code of el.indices) {
+      for (const code of elementCodes[elIndex]) {
         const [ix, iy, iz] = mortonDecode(code);
         matrix.makeScale(size, size, size);
         matrix.setPosition(
@@ -855,7 +872,7 @@ function buildVoxelLods(voxelDescription) {
         instanceGuids[instanceIndex] = el.guid;
         instanceIndex++;
       }
-    }
+    });
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     // 初期visibleは常にfalseにしておき、実際の可視状態はapplyDisplayState()に
@@ -1522,6 +1539,7 @@ window.ifc2usdViewer = {
   getSelectedGuid: () => selectedGuid,
   voxelLods,
   mortonDecode,
+  decodeMortonIndices,
   getGlbRoot: () => glbRoot,
   setDisplayMode,
   getDisplayMode: () => displayMode,
