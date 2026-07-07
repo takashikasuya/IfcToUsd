@@ -407,8 +407,8 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
 
     現行スキーマへの対応:
     - `origin` = `offset * voxelSize`（ワールド座標, m）。indicesはoffset起点格子の
-      符号のままv2のorigin起点格子と同一の格子を指すため、値の再計算は不要
-      （ソート後 `encode_morton_indices` で符号化するのみ）。
+      符号のまま現行スキーマのorigin起点格子と同一の格子を指すため、値の再計算は
+      不要（ソート後 `encode_morton_indices` で符号化するのみ）。
     - Morton符号化された色は morton_decode で(R,G,B)へ復号し、0-1へ正規化する。
       pymorton.interleave3 はxを最下位ビットに置く規約で、morton_encode/decodeと
       ビット順が一致する（pymorton実ソースとのランダム化一致テストで確認済み）。
@@ -416,8 +416,8 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
       符号は色・空間とも最大2^30-1に収まる。逆に言うと、格子が一辺1024セルを
       超えたノートブック実行はv1生成時点でエイリアスした壊れたデータを出力して
       おり、どんな変換でも復元できない（この関数の責任範囲外の既知の制約）。
-    - `metadata` はv2へ持ち込まない（spec.md §2: 属性はGUIDでUSD/scene.json側を
-      参照し、JSONへ重複格納しない）。
+    - `metadata` は現行スキーマへ持ち込まない（spec.md §2: 属性はGUIDでUSD/scene.json
+      側を参照し、JSONへ重複格納しない）。
     - v1自身は座標系情報を持たない（ノートブックはglTFシーンをそのまま
       ボクセル化しており上軸はソース依存）ため、up_axisは呼び出し側指定とする。
 
