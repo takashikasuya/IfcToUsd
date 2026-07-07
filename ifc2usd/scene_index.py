@@ -22,6 +22,22 @@ _SCHEMA_VERSION = 1
 _METADATA_KEYS = ("GUID", "class", "Name", "LongName", "Description", "Latitude", "Longitude")
 
 
+def _node_color(prim: Usd.Prim) -> Optional[list]:
+    """要素のdisplayColor(usd.pyがmesh prim作成時に書き込む、tests/test_convert.py
+    のEXPECTED_WALLSと同じ値)をツリー色チップ(E8-3/Issue #44)用に返す。
+    Site/Building/Storeyのようにmesh子primを持たないノードはNone
+    （scene.jsonスキーマの後方互換: 無ければビューワー側でチップ非表示）。
+    """
+    mesh_prim = prim.GetChild(MESH_PRIM_NAME)
+    if not mesh_prim.IsValid():
+        return None
+    display_color = UsdGeom.Mesh(mesh_prim).GetDisplayColorAttr().Get()
+    if not display_color:
+        return None
+    c = display_color[0]
+    return [c[0], c[1], c[2]]
+
+
 def _tree_node(prim: Usd.Prim) -> dict:
     all_custom_data = prim.GetCustomData()
     cd = {key: all_custom_data[key] for key in _METADATA_KEYS if key in all_custom_data}
@@ -33,6 +49,7 @@ def _tree_node(prim: Usd.Prim) -> dict:
         "name": cd.get("Name"),
         "class": cd.get("class"),
         "guid": cd.get("GUID"),
+        "color": _node_color(prim),
         "customData": cd,
         "children": children,
     }

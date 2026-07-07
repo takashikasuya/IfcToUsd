@@ -60,7 +60,7 @@ def test_tree_reflects_scene_json_hierarchy(page, served_url):
     _wait_for_load(page, served_url)
 
     labels = page.eval_on_selector_all(
-        "#tree-panel [data-guid] > .tree-label", "els => els.map(e => e.textContent)"
+        "#tree-panel [data-guid] .tree-label", "els => els.map(e => e.textContent)"
     )
     joined = " ".join(labels)
     assert "Fixture Site" in joined
@@ -71,7 +71,7 @@ def test_tree_reflects_scene_json_hierarchy(page, served_url):
 
     # 階層構造: Storey配下にWallのノードがネストしている
     nested = page.eval_on_selector(
-        '[data-guid] ul li [data-guid] > .tree-label:has-text("Wall North")',
+        '[data-guid] ul li [data-guid] .tree-label:has-text("Wall North")',
         "el => el !== null",
     )
     assert nested
@@ -104,7 +104,7 @@ def test_visibility_toggle_hides_object_in_3d_scene(page, served_url):
 
     assert object_visible() is True
 
-    checkbox = page.locator(f'[data-guid="{wall_guid}"] > .tree-visibility')
+    checkbox = page.locator(f'[data-guid="{wall_guid}"] .tree-visibility').first
     checkbox.uncheck()
     assert object_visible() is False
 
@@ -132,7 +132,7 @@ def test_clicking_tree_node_highlights_corresponding_3d_object(page, served_url)
 
     assert not is_highlighted()
 
-    page.locator(f'[data-guid="{wall_guid}"] > .tree-label').click()
+    page.locator(f'[data-guid="{wall_guid}"] .tree-label').click()
     assert is_highlighted()
 
 
@@ -150,10 +150,10 @@ def test_selecting_another_node_deselects_the_previous_one(page, served_url):
         }
     """)
 
-    page.locator(f'[data-guid="{north_guid}"] > .tree-label').click()
+    page.locator(f'[data-guid="{north_guid}"] .tree-label').click()
     assert page.evaluate("window.ifc2usdViewer.getSelectedGuid()") == north_guid
 
-    page.locator(f'[data-guid="{east_guid}"] > .tree-label').click()
+    page.locator(f'[data-guid="{east_guid}"] .tree-label').click()
     assert page.evaluate("window.ifc2usdViewer.getSelectedGuid()") == east_guid
 
 
