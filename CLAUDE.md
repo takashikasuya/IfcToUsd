@@ -51,11 +51,17 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   convention `append_prim()` writes.
 - `voxel.py` — surface/interior voxelization (`voxelize_mesh`, AABB-vs-grid-cell overlap on
   numpy arrays), self-implemented Morton (Z-order) encode/decode, `build_voxel_json()` (spec.md
-  §2 JSON v2), and `build_voxel_stage()` (spec.md §3 PointInstancer layer — one prototype Cube
+  §2 JSON v3), and `build_voxel_stage()` (spec.md §3 PointInstancer layer — one prototype Cube
   per element, one `voxelLOD` variant per `--size`, referencing the canonical USD without
   modifying it). Writes via `Usd.Stage.CreateNew(output_path)` + `GetRootLayer().Save()`, not
   `Stage.Export()`, because `Export()` flattens to the currently-selected variant and would
-  discard the other LODs.
+  discard the other LODs. `fill=True` interior detection is a pure voxel-grid exterior
+  flood-fill (`_exterior_voxels`/`_fill_voxels`), not `trimesh.contains()` ray-casting — the
+  latter proved unreliable on real non-manifold multi-body geometry (Issue #36 / E7-2). Each
+  element's `indices` in the JSON are delta+RLE encoded (`encode_morton_indices`/
+  `decode_morton_indices`, Issue #38 / E7-4) rather than a flat integer list; `viewer.js`'s
+  `decodeMortonIndices` decodes that form but also passes a plain array through unchanged, so
+  v2-shaped `indices` (older files, or the client-side v1→current converter) still load.
 - `sdf.py` — `build_narrow_band_sdf()` builds a sparse signed-distance field from an occupancy
   voxel grid: dilates the surface voxel set by `band_width` cells (pure-Python 26-neighbor
   dilation, no scipy dependency) and computes brute-force nearest-surface distance via numpy
@@ -165,14 +171,17 @@ volume fields and analysis display): E5-1 (narrow-band SDF, `sdf.py`) and a scop
 (UsdVol+OpenVDB output) and full GPU raymarching are blocked on OpenVDB having no
 pip-installable Python bindings in this environment (see the note under Epic E5 in
 `docs/viewer/backlog.md`); Epic E6 is untouched. Epic E7 (voxelization/rendering quality) is
-partially done (E7-1 vectorization, E7-3 voxel selection highlight, plus a wireframe toggle);
-E7-2/E7-4 and the voxel-near-black rendering bug (Issue #39) remain open. Two design-only
-epics are specified but not implemented: Epic E8 (viewer UX/design overhaul,
-`docs/viewer/ux-spec.md` — outline highlighting, tree/3D linkage, design tokens) and Epic E9
-(building-OS digital twin mode, `docs/viewer/digital-twin-spec.md` — GUTP Building OS RI
-integration; note the researched fact that its data model carries no IFC GUIDs, so the
-GUID↔point mapping layer is ours; E9-5 is the path that finally implements E5-4). Consult
-`docs/viewer/spec.md` before extending viewer-related features.
+fully done: E7-1 vectorization, E7-2 flood-fill interior detection, E7-3 voxel selection
+highlight, E7-4 Morton index delta+RLE compression, plus a wireframe toggle and the
+voxel-near-black rendering bug fix (Issue #39). Epic E8 (viewer UX/design overhaul,
+`docs/viewer/ux-spec.md` — outline highlighting, tree/3D linkage, tree/property panel
+improvements, toolbar grouping/design tokens/keyboard shortcuts) is fully done (E8-1 through
+E8-6). Epic E9 (building-OS digital twin mode, `docs/viewer/digital-twin-spec.md` — GUTP
+Building OS RI integration; note the researched fact that its data model carries no IFC
+GUIDs, so the GUID↔point mapping layer is ours; E9-5 is the path that finally implements
+E5-4) is specified but not implemented — split it into per-story issues before starting,
+following the E5/E6 precedent. Consult `docs/viewer/spec.md` before extending viewer-related
+features.
 
 ## Out of scope
 

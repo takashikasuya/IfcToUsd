@@ -55,7 +55,7 @@ def test_build_serve_directory_produces_voxels_json(usda, tmp_path):
     assert voxels_path.is_file()
 
     voxels = json.loads(voxels_path.read_text(encoding="utf-8"))
-    assert voxels["version"] == 2
+    assert voxels["version"] == 3
     assert len(voxels["lods"]) == 1
     assert voxels["lods"][0]["size"] == 0.5
     guids = {el["guid"] for el in voxels["lods"][0]["elements"]}

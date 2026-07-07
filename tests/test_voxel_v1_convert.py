@@ -1,4 +1,4 @@
-"""v1ボクセルJSON（ノートブック形式）→v2変換のテスト（Issue #17 / E1-5）。
+"""v1ボクセルJSON（ノートブック形式）→現行スキーマ変換のテスト（Issue #17 / E1-5）。
 
 v1はGLTF_to_Voxel.ipynbのcell 6が出力する形式:
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from ifc2usd.voxel import convert_v1_voxel_json, morton_decode, morton_encode
+from ifc2usd.voxel import convert_v1_voxel_json, decode_morton_indices, morton_decode, morton_encode
 
 
 def _v1_fixture() -> dict:
@@ -54,9 +54,9 @@ def _v1_fixture() -> dict:
     }
 
 
-def test_converted_top_level_schema_is_v2():
+def test_converted_top_level_schema_matches_current_version():
     v2 = convert_v1_voxel_json(_v1_fixture())
-    assert v2["version"] == 2
+    assert v2["version"] == 3
     assert v2["units"] == "m"
     assert v2["upAxis"] == "Z"
     assert len(v2["lods"]) == 1
@@ -86,9 +86,10 @@ def test_indices_are_preserved_and_sorted():
     v2 = convert_v1_voxel_json(_v1_fixture())
     wall = v2["lods"][0]["elements"][0]
     original = [morton_encode(0, 0, 0), morton_encode(1, 0, 0), morton_encode(0, 2, 1)]
-    assert wall["indices"] == sorted(original)
+    codes = decode_morton_indices(wall["indices"])
+    assert codes == sorted(original)
     # 復元先の格子座標も同一集合
-    assert {morton_decode(c) for c in wall["indices"]} == {(0, 0, 0), (1, 0, 0), (0, 2, 1)}
+    assert {morton_decode(c) for c in codes} == {(0, 0, 0), (1, 0, 0), (0, 2, 1)}
 
 
 def test_guid_class_name_are_carried_over():
@@ -99,7 +100,7 @@ def test_guid_class_name_are_carried_over():
     assert wall["name"] == "壁-001"
 
 
-def test_metadata_is_not_duplicated_into_v2():
+def test_metadata_is_not_duplicated_into_converted_output():
     """spec.md §2: 属性詳細はJSONへ重複格納せず、GUIDでUSD/scene.json側を参照する。
     v1のmetadataはv2要素へ持ち込まない。"""
     v2 = convert_v1_voxel_json(_v1_fixture())
@@ -127,7 +128,7 @@ def test_rejects_json_without_v1_markers():
         convert_v1_voxel_json({"version": 2, "origin": [0, 0, 0], "lods": []})
 
 
-def test_result_is_loadable_by_elements_from_v2_consumers():
+def test_result_is_loadable_by_elements_from_current_schema_consumers():
     """変換結果がv2の既存コンシューマ(viewer.jsのbuildVoxelLodsが読む形)と同じ
     構造キーを持つこと(既存のbuild_voxel_json出力と同じキー集合)。"""
     from ifc2usd.voxel import build_voxel_json, VoxelElement

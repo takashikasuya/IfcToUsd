@@ -15,7 +15,13 @@ import numpy as np
 import pytest
 import trimesh
 
-from ifc2usd.voxel import morton_decode, morton_encode, voxelize_mesh
+from ifc2usd.voxel import (
+    decode_morton_indices,
+    encode_morton_indices,
+    morton_decode,
+    morton_encode,
+    voxelize_mesh,
+)
 from tests.conftest import wall_mesh_path, world_mesh
 
 
@@ -41,6 +47,35 @@ def test_morton_encode_is_injective_over_small_range():
 def test_morton_rejects_negative_coordinates():
     with pytest.raises(ValueError):
         morton_encode(-1, 0, 0)
+
+
+# --- Morton索引配列の delta+RLE 符号化（Issue #38 / E7-4） ---
+
+
+def test_encode_decode_morton_indices_round_trip():
+    codes = sorted({morton_encode(x, y, z) for x in range(4) for y in range(4) for z in range(4)})
+    encoded = encode_morton_indices(codes)
+    assert decode_morton_indices(encoded) == codes
+
+
+def test_encode_morton_indices_of_empty_list():
+    encoded = encode_morton_indices([])
+    assert encoded == {"base": None, "deltas": []}
+    assert decode_morton_indices(encoded) == []
+
+
+def test_encode_morton_indices_of_single_code():
+    encoded = encode_morton_indices([42])
+    assert encoded == {"base": 42, "deltas": []}
+    assert decode_morton_indices(encoded) == [42]
+
+
+def test_encode_morton_indices_runs_repeated_equal_deltas():
+    # 1, 3, 5, 7, 9 -> deltaは全て2 -> 1回のrunにまとまる
+    codes = [1, 3, 5, 7, 9]
+    encoded = encode_morton_indices(codes)
+    assert encoded == {"base": 1, "deltas": [[2, 4]]}
+    assert decode_morton_indices(encoded) == codes
 
 
 # --- 表面占有ボクセル化 ---

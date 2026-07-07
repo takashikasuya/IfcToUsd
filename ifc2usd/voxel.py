@@ -15,7 +15,7 @@ from typing import NamedTuple, Optional, Sequence
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom
 
-_JSON_VERSION = 2
+_JSON_VERSION = 3  # v3: indicesがdelta+RLE符号化された形式（Issue #38 / E7-4）
 _UNITS = "m"
 
 
@@ -57,6 +57,47 @@ def morton_decode(code: int) -> tuple[int, int, int]:
         z |= ((code >> (3 * i + 2)) & 1) << i
         i += 1
     return x, y, z
+
+
+def encode_morton_indices(sorted_codes: Sequence[int]) -> dict:
+    """ソート済みMortonコード列をdelta + run-length符号化する（Issue #38 / E7-4）。
+
+    spec.md §2はvoxels.jsonの`indices`をソート済みで格納する規定のため、隣接する
+    差分（delta）は小さい値・同じ値の繰り返しになりやすい（特に規則的な間隔で
+    並ぶボクセル格子）。差分を取ったうえで同じ値が連続する区間をrun-length化
+    することで、素朴な整数リストよりJSON出力サイズを削減できる。
+
+    Returns:
+        ``{"base": 先頭コード, "deltas": [[delta, 連続回数], ...]}``。
+        空リストの場合は ``{"base": None, "deltas": []}``。
+    """
+    if not sorted_codes:
+        return {"base": None, "deltas": []}
+
+    base = sorted_codes[0]
+    runs: list[list[int]] = []
+    prev = base
+    for code in sorted_codes[1:]:
+        delta = code - prev
+        if runs and runs[-1][0] == delta:
+            runs[-1][1] += 1
+        else:
+            runs.append([delta, 1])
+        prev = code
+    return {"base": base, "deltas": runs}
+
+
+def decode_morton_indices(encoded: dict) -> list[int]:
+    """`encode_morton_indices` の逆変換。"""
+    base = encoded.get("base")
+    if base is None:
+        return []
+
+    codes = [base]
+    for delta, count in encoded.get("deltas", []):
+        for _ in range(count):
+            codes.append(codes[-1] + delta)
+    return codes
 
 
 def _snap_to_integer(value: np.ndarray, tol: float = 1e-9) -> np.ndarray:
@@ -309,14 +350,16 @@ def build_voxel_json(
     up_axis: str = "Z",
     fill: bool = False,
 ) -> dict:
-    """`docs/viewer/spec.md` §2 のボクセル JSON v2 を構築する。
+    """`docs/viewer/spec.md` §2 のボクセル JSON（v3）を構築する。
 
     全要素・全LODで共有する単一の `origin`（シーン全体のワールドAABB最小点）を
     用いるため、`origin + index*size` はどの要素・どのLODでも同じワールド座標系
     に一致する。頂点を持たない要素は出力から除外する。ボクセル化した結果
-    占有ボクセルが0個になった要素は、`indices: []` として出力する（他のLODには
-    出現するのにこのLODでは要素自体が消えてしまうと、ビューワー側で「このLODに
-    存在しない」のか「存在するが空」なのか区別できなくなるため）。
+    占有ボクセルが0個になった要素は、`indices` を空（`encode_morton_indices([])`）
+    として出力する（他のLODには出現するのにこのLODでは要素自体が消えてしまうと、
+    ビューワー側で「このLODに存在しない」のか「存在するが空」なのか区別できなく
+    なるため）。`indices` は素朴な整数リストではなく `encode_morton_indices` に
+    よるdelta+RLE符号化（Issue #38 / E7-4、大規模モデルでのJSON出力サイズ削減）。
     """
     origin = scene_origin(elements)
 
@@ -338,7 +381,7 @@ def build_voxel_json(
                     "class": el.cls,
                     "name": el.name,
                     "color": list(el.color),
-                    "indices": indices,
+                    "indices": encode_morton_indices(indices),
                 }
             )
         lods.append({"size": size, "elements": lod_elements})
@@ -354,7 +397,7 @@ def build_voxel_json(
 
 
 def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
-    """ノートブック形式のボクセルJSON v1をv2スキーマへ変換する（spec.md §2の
+    """ノートブック形式のボクセルJSON v1を現行スキーマへ変換する（spec.md §2の
     後方互換規定、Issue #17 / E1-5）。
 
     v1は `GLTF_to_Voxel.ipynb` が出力する形式:
@@ -362,10 +405,10 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
     座標)、要素ごとの `color`(pymorton.interleave3(R,G,B)、各0-255のMorton符号化
     整数)、`indices`(offset起点格子のMorton符号)、`metadata`(属性の重複格納)。
 
-    v2への対応:
+    現行スキーマへの対応:
     - `origin` = `offset * voxelSize`（ワールド座標, m）。indicesはoffset起点格子の
       符号のままv2のorigin起点格子と同一の格子を指すため、値の再計算は不要
-      （ソート済み格納の規定のみ適用する）。
+      （ソート後 `encode_morton_indices` で符号化するのみ）。
     - Morton符号化された色は morton_decode で(R,G,B)へ復号し、0-1へ正規化する。
       pymorton.interleave3 はxを最下位ビットに置く規約で、morton_encode/decodeと
       ビット順が一致する（pymorton実ソースとのランダム化一致テストで確認済み）。
@@ -400,7 +443,7 @@ def convert_v1_voxel_json(v1: dict, up_axis: str = "Z") -> dict:
                 "class": el["class"],
                 "name": el.get("name"),
                 "color": [r / 255, g / 255, b / 255],
-                "indices": sorted(el["indices"]),
+                "indices": encode_morton_indices(sorted(el["indices"])),
             }
         )
 
