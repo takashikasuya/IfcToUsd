@@ -2,21 +2,18 @@
 
 `docs/viewer/spec.md` §1.1, §2 に対応する。ボクセル化はメッシュの表面（既定）
 または内部充填（``fill=True``）を占有格子（``origin`` からの整数インデックス
-``(ix, iy, iz)``）として返す。占有判定は自前実装（各三角形のAABBを占有格子へ
-展開する方式）で行い、内部充填のみ trimesh の point-in-mesh 判定を利用する。
-Morton符号化はビット桁のインタリーブによる自前実装。
+``(ix, iy, iz)``）として返す。占有判定・内部充填とも自前実装（占有格子上の
+幾何演算のみで、trimeshのpoint-in-mesh判定には依存しない。Issue #36 / E7-2
+参照）。Morton符号化はビット桁のインタリーブによる自前実装。
 """
 
 from __future__ import annotations
 
-import logging
+from collections import deque
 from typing import NamedTuple, Optional, Sequence
 
 import numpy as np
-import trimesh
 from pxr import Gf, Sdf, Usd, UsdGeom
-
-logger = logging.getLogger("ifc2usd")
 
 _JSON_VERSION = 2
 _UNITS = "m"
@@ -157,10 +154,63 @@ def _surface_voxels(
     return voxels
 
 
-def _fill_voxels(
-    mesh: trimesh.Trimesh, surface: set[tuple[int, int, int]], size: float, origin: np.ndarray
+_FLOOD_FILL_NEIGHBORS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+
+
+def _exterior_voxels(
+    surface: set[tuple[int, int, int]], lo: tuple[int, int, int], hi: tuple[int, int, int]
 ) -> set[tuple[int, int, int]]:
-    """surface のAABB範囲内で、中心点がメッシュ内部にあるセルを追加する。"""
+    """surface を壁とみなし、[lo, hi] を1セル分外側へ広げた領域の隅から6方向
+    （面隣接）フラッドフィルで到達できるセル集合を返す（外部判定）。"""
+    padded_lo = (lo[0] - 1, lo[1] - 1, lo[2] - 1)
+    padded_hi = (hi[0] + 1, hi[1] + 1, hi[2] + 1)
+
+    start = padded_lo
+    exterior = {start}
+    queue = deque([start])
+    while queue:
+        cx, cy, cz = queue.popleft()
+        for dx, dy, dz in _FLOOD_FILL_NEIGHBORS:
+            neighbor = (cx + dx, cy + dy, cz + dz)
+            if not (
+                padded_lo[0] <= neighbor[0] <= padded_hi[0]
+                and padded_lo[1] <= neighbor[1] <= padded_hi[1]
+                and padded_lo[2] <= neighbor[2] <= padded_hi[2]
+            ):
+                continue
+            if neighbor in exterior or neighbor in surface:
+                continue
+            exterior.add(neighbor)
+            queue.append(neighbor)
+    return exterior
+
+
+def _fill_voxels(surface: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
+    """surface のAABB範囲内で、外部から6方向フラッドフィルで到達できないセルを
+    内部として追加する（Issue #36 / E7-2）。
+
+    以前は `trimesh.Trimesh.contains()`（レイキャストによるparity判定）に
+    依存していたが、`ifc.py` が `weld-vertices=False` で読み込むため各面が
+    独自の頂点を持ち、`trimesh` の水密性チェック（頂点インデックスに基づく辺の
+    共有判定）は常にFalseになる。実データ(`files/ToyodaLab.ifc`)で調査した
+    ところ、この非水密判定は要素の71%で発生するが、実際に真の穴（境界エッジ、
+    1つの面にしか属さない辺）を持つのは元々中空/薄板形状で「内部」概念自体が
+    無いIfcWindow/IfcDoorのみで、構造要素（IfcWallStandardCase/IfcColumn/
+    IfcSlab）は全て水密、IfcFurnishingElement/IfcBuildingElementProxyは複数の
+    ボディが接触する非多様体エッジ（1つの辺に3つ以上の面が集まる）を持つが
+    境界エッジは0（=真の穴は無い）と判明した。
+
+    フラッドフィルは表面ボクセルシェルに隙間があるかどうかだけに依存し、
+    メッシュの位相的水密性やレイキャストparityの数値的不安定性に一切左右
+    されないため、この種の「位相チェック上は非水密だが幾何学的には閉じている」
+    ケースに頑健。
+
+    既知の限界: 表面ボクセル化が実際に隙間を持つ場合（境界エッジがある形状、
+    IfcWindow等）、外部フラッドフィルがその隙間から内部へ「漏れる」ため、
+    その要素の内部は充填されない（surfaceのまま）。これは頑健性の欠如では
+    なく、そもそも閉じていない形状に対する妥当な結果である
+    （tests/test_voxel.pyで再現・検証済み）。
+    """
     if not surface:
         return set(surface)
 
@@ -170,20 +220,15 @@ def _fill_voxels(
     lo = (min(xs), min(ys), min(zs))
     hi = (max(xs), max(ys), max(zs))
 
-    candidates = [
-        (ix, iy, iz)
-        for ix in range(lo[0], hi[0] + 1)
-        for iy in range(lo[1], hi[1] + 1)
-        for iz in range(lo[2], hi[2] + 1)
-        if (ix, iy, iz) not in surface
-    ]
-    if not candidates:
-        return set(surface)
+    exterior = _exterior_voxels(surface, lo, hi)
 
-    centers = origin + (np.array(candidates) + 0.5) * size
-    inside = mesh.contains(centers)
     filled = set(surface)
-    filled.update(idx for idx, is_inside in zip(candidates, inside) if is_inside)
+    for ix in range(lo[0], hi[0] + 1):
+        for iy in range(lo[1], hi[1] + 1):
+            for iz in range(lo[2], hi[2] + 1):
+                cell = (ix, iy, iz)
+                if cell not in surface and cell not in exterior:
+                    filled.add(cell)
     return filled
 
 
@@ -201,7 +246,8 @@ def voxelize_mesh(
         indices: 三角形の頂点インデックス（flat, 3個ずつ組）。
         size: ボクセル一辺の長さ（m）。
         origin: ボクセル格子原点（ワールド座標）。省略時はメッシュのAABB最小点。
-        fill: True の場合、表面占有に加えて内部（trimeshのcontains判定）も占有とする。
+        fill: True の場合、表面占有に加えて内部（外部フラッドフィルで到達不能な
+            セル）も占有とする。
 
     Returns:
         (使用した origin, 占有格子インデックス (ix, iy, iz) の集合)
@@ -232,16 +278,7 @@ def voxelize_mesh(
     surface = _surface_voxels(verts, triangles, size, origin_arr)
 
     if fill:
-        # process=True（既定）で頂点溶接・退化面除去を行う。ifc.py は
-        # weld-vertices=False で法線を保持するため、各面が独自の頂点を持ち
-        # 未処理では非水密メッシュとなり mesh.contains() が信頼できない。
-        mesh = trimesh.Trimesh(vertices=verts, faces=triangles)
-        if not mesh.is_watertight:
-            logger.warning(
-                "voxelize_mesh: mesh is not watertight after processing; "
-                "fill=True interior detection may be unreliable"
-            )
-        occupied = _fill_voxels(mesh, surface, size, origin_arr)
+        occupied = _fill_voxels(surface)
     else:
         occupied = surface
 
