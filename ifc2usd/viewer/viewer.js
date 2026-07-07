@@ -1029,12 +1029,43 @@ window.addEventListener("keydown", (event) => {
   event.preventDefault();
 });
 
+// v1（ノートブックGLTF_to_Voxel.ipynb形式）→v2変換（spec.md §2の後方互換規定、
+// Issue #17 / E1-5）。Python側のifc2usd.voxel.convert_v1_voxel_jsonと同一の変換
+// （そちらのdocstringに変換規則の詳細）。ビューワー読み込み時にも受け付ける
+// ことで、旧ノートブックの既存出力を手動配置したディレクトリでもそのまま
+// 表示できる。
+function convertV1VoxelJson(v1) {
+  const size = v1.voxelSize;
+  const origin = v1.offset.map((component) => component * size);
+  const elements = (v1.elements || []).map((el) => {
+    const [r, g, b] = mortonDecode(el.color);
+    return {
+      guid: el.guid,
+      class: el.class,
+      name: el.name ?? null,
+      color: [r / 255, g / 255, b / 255],
+      indices: [...el.indices].sort((a, b2) => a - b2),
+    };
+  });
+  return {
+    version: 2,
+    units: "m",
+    upAxis: "Z",
+    source: { convertedFrom: "v1" },
+    origin,
+    lods: [{ size, elements }],
+  };
+}
+
 async function loadVoxels(voxelsUrl) {
   const response = await fetch(voxelsUrl);
   if (!response.ok) {
     throw new Error(`failed to load voxels: ${response.status}`);
   }
-  const voxelDescription = await response.json();
+  let voxelDescription = await response.json();
+  if (voxelDescription.voxelSize !== undefined && voxelDescription.offset !== undefined) {
+    voxelDescription = convertV1VoxelJson(voxelDescription);
+  }
   buildVoxelLods(voxelDescription);
   applyDisplayState();
 }

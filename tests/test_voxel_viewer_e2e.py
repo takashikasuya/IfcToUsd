@@ -238,6 +238,72 @@ def test_multiple_lods_only_first_visible_by_default(browser, tmp_path):
         thread.join(timeout=5)
 
 
+def test_v1_voxels_json_is_converted_and_rendered(browser, tmp_path):
+    """spec.md §2の後方互換規定(Issue #17 / E1-5): ノートブック形式のv1
+    ボクセルJSON(voxelSize/offset/Morton符号化色)を配信ディレクトリへ手動配置
+    しても、ビューワーが読み込み時にv2へ変換して表示できる。"""
+    import json as json_module
+
+    from ifc2usd.voxel import morton_encode
+
+    server, thread, url, workdir = _serve(tmp_path, "www_v1_voxels")
+    try:
+        voxels_files = list(workdir.glob("*_voxels.json"))
+        assert len(voxels_files) == 1
+        v1 = {
+            "voxelSize": 0.5,
+            "offset": [-2, 0, 3],
+            "elements": [
+                {
+                    "guid": "v1guid001",
+                    "name": "V1 Wall",
+                    "class": "IfcWall",
+                    "indices": [morton_encode(0, 0, 0), morton_encode(1, 0, 0)],
+                    "color": morton_encode(204, 51, 51),  # RGB(204,51,51) = [0.8, 0.2, 0.2]
+                    "metadata": {"Description": "legacy"},
+                }
+            ],
+        }
+        voxels_files[0].write_text(json_module.dumps(v1), encoding="utf-8")
+
+        page = browser.new_page(viewport={"width": 800, "height": 600})
+        errors = []
+        page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+        _wait_for_load(page, url)
+
+        assert page.evaluate("window.ifc2usdViewer.voxelLods.length") == 1
+        assert page.evaluate("window.ifc2usdViewer.voxelLods[0].mesh.count") == 2
+
+        # Morton符号化色が0-1正規化RGBへ復号されている
+        color = page.evaluate("""
+            () => {
+                const arr = window.ifc2usdViewer.voxelLods[0].mesh.instanceColor.array;
+                return [arr[0], arr[1], arr[2]];
+            }
+        """)
+        assert color[0] == pytest.approx(204 / 255, abs=1e-4)
+        assert color[1] == pytest.approx(51 / 255, abs=1e-4)
+        assert color[2] == pytest.approx(51 / 255, abs=1e-4)
+
+        # ワールド座標: origin = offset * voxelSize = (-1.0, 0.0, 1.5)、
+        # 最初のボクセル(0,0,0)の中心は origin + 0.5*size
+        first_position = page.evaluate("""
+            () => {
+                const arr = window.ifc2usdViewer.voxelLods[0].mesh.instanceMatrix.array;
+                return [arr[12], arr[13], arr[14]];
+            }
+        """)
+        assert first_position[0] == pytest.approx(-1.0 + 0.25, abs=1e-4)
+        assert first_position[1] == pytest.approx(0.0 + 0.25, abs=1e-4)
+        assert first_position[2] == pytest.approx(1.5 + 0.25, abs=1e-4)
+
+        assert errors == []
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_broken_voxels_json_degrades_to_mesh_only(browser, tmp_path):
     """voxels.jsonの読み込み・パースに失敗しても、メッシュ表示自体は壊れず
     ロードが完了すること（ボクセルはあくまで付加的な情報という設計）。"""
