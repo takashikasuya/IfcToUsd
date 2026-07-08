@@ -30,7 +30,10 @@ from tqdm import tqdm
 from . import __version__
 from .gltf import export_gltf
 from .ifc import create_settings, get_geometry
+from .mapping import MappingValidationError
 from .serve import build_serve_directory, make_server
+from .twin import TwinClient, build_twin_json
+from .twin_proxy import TwinProxy, load_twin_config
 from .usd import build_stage, elements_from_stage
 from .voxel import build_voxel_json, build_voxel_stage
 
@@ -211,6 +214,13 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
         "--sdf-slices", action="store_true",
         help="Also compute per-element narrow-band SDF horizontal slices (E5-3) for viewer overlay",
     )
+    parser.add_argument(
+        "--twin", type=Path, default=None,
+        help=(
+            "Path to a twin-config.json (Building OS connection + metrics + mapping.json "
+            "path) to enable live digital-twin mode (E9-3)"
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
 
 
@@ -219,12 +229,32 @@ def _run_serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     if not args.usd_path.is_file():
         parser.error(f"USD file not found: {args.usd_path}")
 
+    twin_json = None
+    twin_proxy = None
+    if args.twin:
+        if not args.twin.is_file():
+            parser.error(f"twin config file not found: {args.twin}")
+        try:
+            twin_config = load_twin_config(args.twin)
+        except (json.JSONDecodeError, KeyError, FileNotFoundError, MappingValidationError) as exc:
+            parser.error(f"invalid twin config {args.twin}: {exc}")
+        twin_json = build_twin_json(
+            twin_config["metrics"],
+            twin_config["bindings"],
+            poll_interval_seconds=twin_config["poll_interval_seconds"],
+            stale_threshold_seconds=twin_config["stale_threshold_seconds"],
+        )
+        client = TwinClient(twin_config["base_url"], token=twin_config["token"])
+        twin_proxy = TwinProxy(
+            client, twin_config["bindings"], ttl_seconds=twin_config["poll_interval_seconds"]
+        )
+
     with tempfile.TemporaryDirectory(prefix="ifc2usd_serve_") as tmpdir:
         workdir = Path(tmpdir)
-        build_serve_directory(args.usd_path, workdir, sdf_slices=args.sdf_slices)
+        build_serve_directory(args.usd_path, workdir, sdf_slices=args.sdf_slices, twin=twin_json)
 
         try:
-            server = make_server(workdir, port=args.port)
+            server = make_server(workdir, port=args.port, twin_proxy=twin_proxy)
         except OSError as exc:
             parser.error(f"could not listen on port {args.port}: {exc}")
 

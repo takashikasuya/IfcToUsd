@@ -88,10 +88,24 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   customData for the web viewer, which never parses USD directly.
 - `serve.py` — `build_serve_directory()` assembles a self-contained static directory (GLB,
   scene.json, voxels.json when there's voxelizable geometry, `<stem>_sdf.json` when
-  `sdf_slices=True`, vendored `viewer/` assets); `make_server()` returns an unstarted
-  `ThreadingHTTPServer` bound to `127.0.0.1` only, with directory listing disabled. Unlike
-  voxels.json, SDF slices are opt-in (`sdf_slices=False` default / CLI `--sdf-slices`): they
-  cost an extra per-element voxelize+narrow-band-SDF pass beyond what voxels.json already does.
+  `sdf_slices=True`, `<stem>_twin.json` when a `twin` dict is given (E9-3), vendored `viewer/`
+  assets); `make_server()` returns an unstarted `ThreadingHTTPServer` bound to `127.0.0.1` only,
+  with directory listing disabled. Unlike voxels.json, SDF slices are opt-in
+  (`sdf_slices=False` default / CLI `--sdf-slices`): they cost an extra per-element
+  voxelize+narrow-band-SDF pass beyond what voxels.json already does. `twin.json` is the same
+  "additive asset" shape but never carries live values or credentials (those stay in the
+  `--twin twin-config.json` file and `twin_proxy.py`'s `TwinProxy`, respectively). When
+  `make_server(..., twin_proxy=...)` is given a `TwinProxy` (built from `twin_proxy.load_twin_config()`
+  + `ifc.py`/`mapping.py`-derived bindings), the returned server additionally whitelists
+  `GET /api/twin/values?metric=` and `GET /api/twin/history?...` as same-origin proxy endpoints
+  onto the Building OS REST API (`twin.py`'s `TwinClient`) — no other upstream endpoint (in
+  particular no control API) is ever reachable through it. `TwinProxy.get_values()` caches per
+  metric with a TTL (`=pollIntervalSeconds`), isolates per-point upstream failures so one flaky
+  sensor doesn't blank out the whole metric, and falls back to the last good value (`stale: true`)
+  only when every point in that metric's refresh failed; proxy error bodies returned to the
+  browser never include the upstream Building OS URL (logged server-side only) per
+  digital-twin-spec.md §6. Omitting `twin_proxy` (the default) leaves `make_server()`'s behavior
+  byte-for-byte identical to before E9-3.
 - `viewer/viewer.js` — three.js web viewer (ES modules, no build step; three.js is vendored
   under `viewer/vendor/`, not CDN-loaded). GLB display, OrbitControls camera, hierarchy tree
   with visibility toggles, click-to-select (mesh and voxel, via `Raycaster` + GUID reverse
