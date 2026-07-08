@@ -266,6 +266,50 @@ def test_build_serve_directory_omits_twin_asset_by_default(usda, tmp_path):
     assert "twin" not in scene["assets"]
 
 
+_SPACE_VOXELS_JSON = {
+    "version": 3,
+    "units": "m",
+    "upAxis": "Z",
+    "source": {},
+    "origin": [0.0, 0.0, 0.0],
+    "lods": [{"size": 1.0, "elements": [{"guid": "space-1", "class": "IfcSpace", "name": "Room 101", "color": [0.5, 0.5, 0.5], "indices": {"base": 0, "deltas": []}}]}],
+}
+
+
+def test_build_serve_directory_produces_space_voxels_asset_when_given(usda, tmp_path):
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir, space_voxels=_SPACE_VOXELS_JSON)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    space_voxels_name = scene["assets"]["spaceVoxels"]
+    space_voxels = json.loads((workdir / space_voxels_name).read_text(encoding="utf-8"))
+    assert space_voxels == _SPACE_VOXELS_JSON
+
+
+def test_build_serve_directory_omits_space_voxels_asset_by_default(usda, tmp_path):
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+    build_serve_directory(usda, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    assert "spaceVoxels" not in scene["assets"]
+
+
+def test_build_serve_directory_warns_on_space_voxels_origin_mismatch(usda, tmp_path, caplog):
+    """コードレビューで検出: space_voxelsのoriginが正本のvoxels.jsonと違う場合
+    （例: 古い/別の--referenceから生成された）、ヒートマップが位置ずれで
+    描画される問題を検出できるよう、サーバーログに警告を残す。"""
+    mismatched = {**_SPACE_VOXELS_JSON, "origin": [999.0, 999.0, 999.0]}
+    workdir = tmp_path / "www"
+    workdir.mkdir()
+
+    with caplog.at_level("WARNING", logger="ifc2usd"):
+        build_serve_directory(usda, workdir, space_voxels=mismatched)
+
+    assert any("origin" in record.getMessage() for record in caplog.records)
+
+
 def _start_server(server) -> threading.Thread:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

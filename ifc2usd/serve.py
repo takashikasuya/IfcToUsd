@@ -49,6 +49,7 @@ def build_serve_directory(
     voxel_sizes: Sequence[float] = _DEFAULT_VOXEL_SIZES,
     sdf_slices: bool = False,
     twin: Mapping | None = None,
+    space_voxels: Mapping | None = None,
 ) -> Path:
     """USD から scene.json/GLB/voxels.json を生成し、静的ビューワーアセットと共に
     `workdir` へ配置する。`workdir` は既存の空ディレクトリを想定する。
@@ -68,6 +69,14 @@ def build_serve_directory(
     参照できるようにする。voxels.json/sdf.jsonと同じ「付加的アセット」の規約:
     値そのものは含めない静的マニフェストで、トークン/クレデンシャルは
     （`--twin twin-config.json`にのみ存在し）ここには一切現れない。
+
+    `space_voxels`（E9-5、digital-twin-spec.md §5.4）に`space_heatmap.
+    build_space_voxel_json()`が返す辞書を渡すと`<stem>_space_voxels.json`として
+    焼き込み、`scene.json`の`assets.spaceVoxels`から参照できるようにする。
+    IfcSpaceジオメトリは正本USD（この関数が開く`usd_path`）には含まれない
+    （`get_geometry()`が除外するため）ので、この関数自身では計算できない——
+    呼び出し側が`ifc2usd space-voxelize`（別途、元のIFCから）で事前に構築した
+    ものを渡す想定。
 
     Raises:
         FileNotFoundError: `usd_path` が存在しない場合。CLI(`serve`)は事前に
@@ -111,6 +120,34 @@ def build_serve_directory(
         twin_name = f"{usd_path.stem}_twin.json"
         (workdir / twin_name).write_text(json.dumps(twin, ensure_ascii=False), encoding="utf-8")
         assets["twin"] = twin_name
+
+    if space_voxels is not None:
+        space_voxels_name = f"{usd_path.stem}_space_voxels.json"
+        # digital-twin-spec.md §5.4はspace_voxelsが正本のvoxels.jsonと同じシーン
+        # 共有origin/upAxisであることを要求する。ここで一致しない場合、ヒートマップは
+        # 建物本体とずれて描画されてしまうが、そのズレは実行時に検出する手段が
+        # ビューワー側に無い（付加的アセットとして中身を信用する設計のため）。
+        # 唯一検出できるこの時点で、サーバーログに警告として残す
+        # （既存の"twin無しでも動く"のと同じ理由で、致命的エラーにはしない）。
+        expected_up_axis = str(UsdGeom.GetStageUpAxis(stage))
+        if space_voxels.get("upAxis") != expected_up_axis:
+            logger.warning(
+                "space_voxels upAxis (%s) does not match %s's upAxis (%s); "
+                "the space heatmap will likely be misaligned. Rebuild it with "
+                "'ifc2usd space-voxelize --reference %s'.",
+                space_voxels.get("upAxis"), usd_path.name, expected_up_axis, usd_path.name,
+            )
+        if "voxels" in assets and space_voxels.get("origin") != voxels["origin"]:
+            logger.warning(
+                "space_voxels origin %s does not match %s's voxels.json origin %s; "
+                "the space heatmap will likely be misaligned. Rebuild it with "
+                "'ifc2usd space-voxelize --reference %s'.",
+                space_voxels.get("origin"), usd_path.name, voxels["origin"], usd_path.name,
+            )
+        (workdir / space_voxels_name).write_text(
+            json.dumps(space_voxels, ensure_ascii=False), encoding="utf-8"
+        )
+        assets["spaceVoxels"] = space_voxels_name
 
     scene = build_scene_json(stage, assets=assets)
     (workdir / "scene.json").write_text(json.dumps(scene, ensure_ascii=False), encoding="utf-8")

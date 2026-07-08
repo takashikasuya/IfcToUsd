@@ -12,6 +12,7 @@ import re
 from typing import Iterator, Optional
 
 import ifcopenshell
+import numpy as np
 from ifcopenshell import geom
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,76 @@ def get_geometry(settings, ifc_file, materials: dict, y_up: bool = False) -> Ite
                 materials[material_name] = (diffuse_color, specular_color, transparency)
 
         yield grouped_verts, indices, grouped_norms, info, material_name, diffuse_color, matrix
+
+        if not iterator.next():
+            break
+
+
+def get_space_geometry(settings, ifc_file, y_up: bool = False) -> Iterator[tuple]:
+    """IfcSpaceのワールド座標ジオメトリを1件ずつ生成する（ジェネレータ、E9-5の
+    先行タスク）。
+
+    `get_geometry()`は空間系エレメント（`_EXCLUDED_TYPES`、IfcSpace含む）を
+    除外するため、空間ボクセルヒートマップ向けに別経路を用意する。正本USD/GLB
+    には一切影響しない（voxels.json/sdf.json/twin.jsonと同じ「付加的アセット」
+    設計原則、`space_heatmap.py`が読む専用の経路）。
+
+    USDのXform階層は経由せず、この関数自身でローカル→ワールド変換を適用した
+    頂点を直接返す——`usd.append_prim`が`geometries`dict由来の頂点へ行う
+    `rotation.dot(vert) + offset`と同じ変換（ifcopenshellのshapeはローカル座標の
+    頂点とワールド変換行列を分けて返すため、USD Xform階層を経由せずここで
+    直接ワールド座標を合成できる）。
+
+    既知の限界（`append_prim`/`get_geometry()`から継承）: `y_up=True`のY/Z
+    入れ替えはワールド変換前のローカル頂点にのみ適用し、回転行列自体は
+    Z-UPのまま組み合わせるため、Y/Z入れ替えと可換でない回転（0°/180°ヨー
+    以外）を持つ要素では正しいY-UPワールド座標にならない。これは`get_geometry()`
+    側で元から存在する変換の組み方であり、この関数はそれを忠実に再現している
+    だけなので、ここだけを直す修正はしない（直すなら`get_geometry()`/
+    `append_prim`を含むパイプライン全体の見直しが必要）。
+
+    Args:
+        settings: ifcopenshell のジオメトリ設定
+        ifc_file: 対象の IFC ファイル
+        y_up: True で Y-UP、False で Z-UP（IFC 既定、`get_geometry()`と同じ規約）
+
+    Yields:
+        (guid, name, world_verts, indices) — world_vertsはワールド座標
+        `(x, y, z)`タプルの列、indicesは三角形の頂点インデックス（flat, 3個ずつ組）。
+    """
+    iterator = geom.iterator(settings, ifc_file, multiprocessing.cpu_count())
+
+    if not iterator.initialize():
+        return
+
+    while True:
+        shape = iterator.get()
+        element = ifc_file.by_guid(shape.guid)
+
+        if not element.is_a("IfcSpace"):
+            if not iterator.next():
+                break
+            continue
+
+        matrix = _matrix12(shape.transformation.matrix)
+        rows = [matrix[i:i + 3] for i in range(0, 12, 3)]
+        offset = np.asarray(rows[3])
+        # rows[0:3] は X/Y/Z 基底ベクトル。列に並べて回転行列とする
+        # （usd.append_primの`rotation = np.asarray((rows[0], rows[1], rows[2])).T`
+        # と同じ構成）
+        rotation = np.asarray((rows[0], rows[1], rows[2])).T
+
+        verts = shape.geometry.verts
+        indices = list(shape.geometry.faces)
+
+        if not y_up:
+            local_verts = [(verts[i], verts[i + 1], verts[i + 2]) for i in range(0, len(verts), 3)]
+        else:
+            local_verts = [(verts[i], verts[i + 2], verts[i + 1]) for i in range(0, len(verts), 3)]
+
+        world_verts = [tuple((rotation.dot(np.asarray(v)) + offset).tolist()) for v in local_verts]
+
+        yield shape.guid, element.Name, world_verts, indices
 
         if not iterator.next():
             break

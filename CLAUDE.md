@@ -18,7 +18,9 @@ uv run ifc2usd <ifc> -o <out.usda> --y-up --verbose
 uv run python -m ifc2usd <ifc>            # equivalent module entry point
 uv run ifc2usd voxelize <usda|ifc> --size 1.0 --size 0.5   # -> <base>.json + <base>.usda
 uv run ifc2usd export-gltf <usda> -o <out.glb>
+uv run ifc2usd space-voxelize <ifc> --reference <usda> --size 0.5 -o <out.json>  # E9-5 space heatmap prerequisite
 uv run ifc2usd serve <usda>                                # local web viewer, http://127.0.0.1:8000
+uv run ifc2usd serve <usda> --twin twin-config.json --space-voxels <out.json>    # E9-3/E9-5 digital twin mode
 uv run pytest                             # run the end-to-end conversion tests
 uv run python tests/generate_fixture.py   # regenerate tests/fixtures/minimal.ifc
 ```
@@ -43,6 +45,14 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
 - `ifc.py` — IFC extraction via `ifcopenshell.geom`. `get_geometry()` is a generator that
   yields `(verts, indices, norms, info, material_name, diffuse_color, matrix)` per element,
   skipping opening/space/zone elements. `get_properties()` flattens IFC property sets.
+  `get_space_geometry()` (E9-5) is the inverse path: it yields ONLY IfcSpace geometry, since
+  the space/voxel heatmap is an additive asset that must never touch the canonical USD/GLB
+  `get_geometry()` produces. It applies the local→world transform itself
+  (`rotation.dot(vert) + offset`, the same composition `usd.append_prim()` does) rather than
+  going through a USD Xform, since spaces never enter that tree. Inherits `get_geometry()`'s
+  existing `--y-up` limitation: the Y/Z swap is applied to local vertices before combining with
+  the (un-swapped) rotation matrix, which is only correct for 0°/180° yaw — a pre-existing
+  pipeline-wide quirk, not something this function introduces or fixes.
 - `usd.py` — USD stage construction. `build_stage()` walks the IFC spatial tree and calls
   `append_prim()` (Xform + optional mesh) for each node; `create_materials()` builds the
   `/Materials` scope up front so meshes can bind to them. `elements_from_stage()` reads a
@@ -62,6 +72,21 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   `decode_morton_indices`, Issue #38 / E7-4) rather than a flat integer list; `viewer.js`'s
   `decodeMortonIndices` decodes that form but also passes a plain array through unchanged, so
   v2-shaped `indices` (older files, or the client-side v1→current converter) still load.
+- `space_heatmap.py` (E9-5) — space/voxel heatmap aggregation. `build_space_voxel_index()`
+  voxelizes each `IfcSpace` (`fill=True`) into a `{morton_code: spaceGuid}` map; overlapping
+  cells (adjacent-space boundaries) go to whichever space has fewer filled voxels (a volume
+  proxy — exact for box shapes, only approximate for complex/non-manifold ones per the same
+  flood-fill limitation `voxel.py` already documents), with a deterministic GUID-string
+  tiebreak so equal-count ties don't depend on `ifcopenshell`'s non-deterministic parallel
+  iterator order. `build_space_voxel_json()` writes that *already-resolved* assignment out in
+  the same v3 schema `voxel.build_voxel_json()` uses (so it rides the viewer's existing
+  InstancedMesh/LOD code) — unlike `build_voxel_json()`, it does not re-voxelize each element
+  independently, which is what keeps a contested boundary cell from appearing in two spaces'
+  `indices` at once. `aggregate_values_by_space()`/`aggregate_values_by_storey()` (mean/min/
+  max/count, explicitly excluding `bool` — a subclass of `int` in Python — from numeric
+  aggregation) are the Python side of the same aggregation `viewer.js` re-implements
+  client-side for live rendering (see below); the Storey fallback exists for models with no
+  `IfcSpace` geometry (digital-twin-spec.md §5.4).
 - `sdf.py` — `build_narrow_band_sdf()` builds a sparse signed-distance field from an occupancy
   voxel grid: dilates the surface voxel set by `band_width` cells (pure-Python 26-neighbor
   dilation, no scipy dependency) and computes brute-force nearest-surface distance via numpy
@@ -105,7 +130,17 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   only when every point in that metric's refresh failed; proxy error bodies returned to the
   browser never include the upstream Building OS URL (logged server-side only) per
   digital-twin-spec.md §6. Omitting `twin_proxy` (the default) leaves `make_server()`'s behavior
-  byte-for-byte identical to before E9-3.
+  byte-for-byte identical to before E9-3. `<stem>_space_voxels.json` (E9-5) is the same
+  additive-asset shape when a `space_voxels` dict is given (`assets.spaceVoxels`); unlike
+  voxels/sdf/twin, `build_serve_directory()` cannot compute it itself (IfcSpace geometry isn't
+  in the canonical USD it opens), so the caller must pre-build it via `space_heatmap.
+  build_space_voxel_json()` — in practice the `ifc2usd space-voxelize` CLI subcommand, run
+  once against the original `.ifc` + the already-converted reference USD, with its output path
+  passed to `serve --space-voxels`. Because that JSON is built independently and must share
+  the *same* scene origin/upAxis as the model's own voxels.json (digital-twin-spec.md §5.4),
+  `build_serve_directory()` cross-checks both and logs a warning (not a hard failure — matching
+  the "additive asset, trust the caller" posture used elsewhere) if they've drifted apart, e.g.
+  from voxelizing against a stale reference.
 - `viewer/viewer.js` — three.js web viewer (ES modules, no build step; three.js is vendored
   under `viewer/vendor/`, not CDN-loaded). GLB display, OrbitControls camera, hierarchy tree
   with visibility toggles, click-to-select (mesh and voxel, via `Raycaster` + GUID reverse
@@ -134,7 +169,22 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   *is* the shared `_ghostMaterial` singleton (E8-1) — doing so recolors every ghosted element in
   the scene at once, not just the live-bound one; both functions check
   `mesh.material === _ghostMaterial` and skip (matching `selectByGuid`'s own pre-existing
-  un-ghost-before-touching-color-or-emissive guard) rather than writing through it.
+  un-ghost-before-touching-color-or-emissive guard) rather than writing through it. When
+  `assets.spaceVoxels` is present (E9-5), a second `InstancedMesh`-per-LOD layer
+  (`spaceVoxelRoot`/`buildSpaceVoxelLods`, same `_voxelUnitBox` geometry as the regular voxel
+  layer but its own per-LOD material so the two never share color state) renders room-level
+  heatmap voxels; visibility piggybacks on the existing "Live" toggle and display-mode radios
+  rather than adding new toolbar UI. `applySpaceValues()` deliberately does not recompute the
+  turbo-LUT/staleness math itself — it aggregates `spaceGuid`-tagged values from the same
+  `/api/twin/values` poll E9-4 already uses (mean, tracking the *oldest* contributing
+  `datetime` so a stale reading anywhere in a room still triggers `_valueToLiveColor`'s
+  desaturation) and calls E9-4's shared `_valueToLiveColor()`, per digital-twin-spec.md §5.5's
+  requirement that live and playback (and now the space heatmap) share one color-application
+  function rather than each reimplementing it. For models with no `IfcSpace` geometry at all
+  (no `assets.spaceVoxels`), the same function falls back to coloring every element mesh under
+  a Storey via `_setLiveColorForGuid` when a binding's `spaceGuid` resolves to that Storey's own
+  GUID (`_buildStoreyDescendantIndex`, built once from `scene.json`'s tree) — digital-twin-spec.md
+  §5.4's Storey-level fallback, reusing E9-4's per-object coloring instead of a separate code path.
 
 ### ifcopenshell 0.8 specifics (breaking vs. the old notebook API)
 
@@ -214,10 +264,14 @@ voxel-near-black rendering bug fix (Issue #39). Epic E8 (viewer UX/design overha
 improvements, toolbar grouping/design tokens/keyboard shortcuts) is fully done (E8-1 through
 E8-6). Epic E9 (building-OS digital twin mode, `docs/viewer/digital-twin-spec.md` — GUTP
 Building OS RI integration; note the researched fact that its data model carries no IFC
-GUIDs, so the GUID↔point mapping layer is ours; E9-5 is the path that finally implements
-E5-4) is specified but not implemented — split it into per-story issues before starting,
-following the E5/E6 precedent. Consult `docs/viewer/spec.md` before extending viewer-related
-features.
+GUIDs, so the GUID↔point mapping layer is ours) has E9-1 through E9-5 implemented: `twin.py`
+(Building OS REST adapter + `twin.json` schema), `mapping.py` (mapping.json's 3 generator
+paths), `twin_proxy.py` + `serve --twin` (whitelisted same-origin proxy with per-metric
+TTL/stale caching), the viewer's "Live" object color-mapping + legend + Live Data panel, and
+`space_heatmap.py` + `ifc2usd space-voxelize` + the viewer's room-level voxel heatmap
+(E9-5, which finally implements E5-4 / closes Issue #30). E9-6 (time-series playback) remains
+unimplemented — split it into its own issue before starting, following the E5/E6/E9 precedent.
+Consult `docs/viewer/spec.md` before extending viewer-related features.
 
 ## Out of scope
 

@@ -209,6 +209,28 @@ const _parentGuidByGuid = new Map();
 // （renderTreeNode内のクロージャ変数に頼らずDOM状態を単一の真実source にする）。
 const _liByGuid = new Map();
 
+// Storey GUID -> 配下の要素(Storey自身を除く)GUIDの列。空間ジオメトリが取れない
+// モデル向けのフォールバック集計（E9-5、digital-twin-spec.md §5.4「Storey単位の
+// フォールバック集計」）に使う——`mapping.json`のspaceGuidバインディングが
+// IfcSpaceの代わりにStorey GUIDを指している場合、その値をStorey配下の全要素
+// メッシュへE9-4のオブジェクト色マッピングと同じ経路で適用する。
+const _elementGuidsByStoreyGuid = new Map();
+
+function _buildStoreyDescendantIndex(tree) {
+  _elementGuidsByStoreyGuid.clear();
+  function walk(nodes, currentStoreyGuid) {
+    for (const node of nodes) {
+      const storeyGuid = node.class === "IfcBuildingStorey" ? node.guid : currentStoreyGuid;
+      if (storeyGuid !== null && node.class !== "IfcBuildingStorey") {
+        if (!_elementGuidsByStoreyGuid.has(storeyGuid)) _elementGuidsByStoreyGuid.set(storeyGuid, []);
+        _elementGuidsByStoreyGuid.get(storeyGuid).push(node.guid);
+      }
+      walk(node.children, storeyGuid);
+    }
+  }
+  walk(tree, null);
+}
+
 function buildNodesByGuid(tree) {
   nodesByGuid.clear();
   _parentGuidByGuid.clear();
@@ -972,7 +994,9 @@ async function refreshLiveValues() {
   try {
     const response = await fetch(`./api/twin/values?metric=${encodeURIComponent(liveMetric)}`);
     if (!response.ok) throw new Error(`failed to fetch live values: ${response.status}`);
-    applyLiveValues(await response.json());
+    const body = await response.json();
+    applyLiveValues(body);
+    applySpaceValues(body.values, Date.now());
     liveToggle.title = _LIVE_TOGGLE_DEFAULT_TITLE;
   } catch (error) {
     // ポーリングが繰り返し失敗しても、チェックボックス自体はON表示のまま
@@ -1007,6 +1031,7 @@ liveMetricSelect.addEventListener("change", () => {
 liveToggle.addEventListener("change", () => {
   liveEnabled = liveToggle.checked;
   livePauseToggle.disabled = !liveEnabled;
+  _updateSpaceVoxelVisibility();
   if (liveEnabled) {
     startLivePolling();
   } else {
@@ -1255,6 +1280,149 @@ function buildVoxelLods(voxelDescription) {
   }
 }
 
+// --- Live: 空間/ボクセルヒートマップ (E9-5, digital-twin-spec.md §5.4) ---
+//
+// `assets.spaceVoxels`（`ifc2usd space-voxelize`が生成、正本のvoxels.jsonと
+// 同じv3スキーマ・同一origin規約）を、regularなvoxelRootとは別の
+// spaceVoxelRoot配下へ、同じInstancedMesh方式で読み込む。表示は「Live」
+// トグル(E9-4)に相乗り——新しいツールバー操作は増やさない。
+
+const spaceVoxelRoot = new THREE.Group();
+modelRoot.add(spaceVoxelRoot);
+const spaceVoxelLods = []; // [{size, mesh, instanceIndicesByGuid}]
+
+function buildSpaceVoxelLods(spaceVoxelDescription) {
+  const origin = spaceVoxelDescription.origin;
+  const matrix = new THREE.Matrix4();
+  // 実際の値が届く(refreshLiveValues)までの初期色。要素色と紛れないよう中間グレー。
+  const neutralColor = new THREE.Color(0x888888);
+
+  for (const mesh of spaceVoxelRoot.children) mesh.material?.dispose?.();
+  spaceVoxelRoot.clear();
+  spaceVoxelLods.length = 0;
+
+  for (const lod of spaceVoxelDescription.lods) {
+    const size = lod.size;
+    const elementCodes = lod.elements.map((el) => decodeMortonIndices(el.indices));
+    const totalInstances = elementCodes.reduce((sum, codes) => sum + codes.length, 0);
+
+    // buildVoxelLods()と同じ理由でvertexColors:trueは指定しない(Issue #39/E8-6)。
+    const material = new THREE.MeshStandardMaterial();
+    const mesh = new THREE.InstancedMesh(_voxelUnitBox, material, totalInstances);
+    const instanceIndicesByGuid = new Map();
+
+    let instanceIndex = 0;
+    lod.elements.forEach((el, elIndex) => {
+      for (const code of elementCodes[elIndex]) {
+        const [ix, iy, iz] = mortonDecode(code);
+        matrix.makeScale(size, size, size);
+        matrix.setPosition(
+          origin[0] + (ix + 0.5) * size,
+          origin[1] + (iy + 0.5) * size,
+          origin[2] + (iz + 0.5) * size,
+        );
+        mesh.setMatrixAt(instanceIndex, matrix);
+        mesh.setColorAt(instanceIndex, neutralColor);
+        if (!instanceIndicesByGuid.has(el.guid)) instanceIndicesByGuid.set(el.guid, []);
+        instanceIndicesByGuid.get(el.guid).push(instanceIndex);
+        instanceIndex++;
+      }
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.visible = false;
+
+    spaceVoxelRoot.add(mesh);
+    spaceVoxelLods.push({ size, mesh, instanceIndicesByGuid });
+  }
+}
+
+// 現在アクティブな(通常の)ボクセルLODと同じサイズの空間ボクセルLODを選ぶ
+// （既存のLOD切替にそのまま乗る、digital-twin-spec.md §5.4）。sizeが一致する
+// ものが無ければ先頭を使う。
+function _activeSpaceVoxelLod() {
+  const activeLod = voxelLods[activeVoxelLodIndex];
+  if (activeLod) {
+    const matching = spaceVoxelLods.find((lod) => lod.size === activeLod.size);
+    if (matching) return matching;
+  }
+  return spaceVoxelLods[0];
+}
+
+function _updateSpaceVoxelVisibility() {
+  const active = _activeSpaceVoxelLod();
+  const showVoxels = displayMode === "voxel" || displayMode === "both";
+  for (const lod of spaceVoxelLods) {
+    lod.mesh.visible = liveEnabled && showVoxels && lod === active;
+  }
+}
+
+// spaceGuidごとに平均を取りつつ、集計に寄与した中で最も古いdatetimeも記録する
+// ——「集計値の鮮度は、寄与した中で最も古い値と同じ」という前提で、E9-4の
+// stale判定（_valueToLiveColor経由）をそのまま再利用できるようにするため
+// （digital-twin-spec.md §5.5「色適用関数はライブ/再生で共通化する」に対応:
+// ここでも新しい色計算式を作らずE9-4のものへ委譲する）。
+// NaN/Infinityの値は`applyColorMappedValues`と同じ理由で除外する
+// （min/maxの汚染・座標を持たないLUT参照を防ぐ）。
+function _aggregateMeanBySpaceGuid(values) {
+  const groups = new Map();
+  for (const entry of values) {
+    if (!entry.spaceGuid || typeof entry.value !== "number" || !Number.isFinite(entry.value)) continue;
+    if (!groups.has(entry.spaceGuid)) groups.set(entry.spaceGuid, { values: [], oldestDatetime: entry.datetime });
+    const group = groups.get(entry.spaceGuid);
+    group.values.push(entry.value);
+    if (entry.datetime && (!group.oldestDatetime || Date.parse(entry.datetime) < Date.parse(group.oldestDatetime))) {
+      group.oldestDatetime = entry.datetime;
+    }
+  }
+  const aggregates = new Map();
+  for (const [guid, group] of groups) {
+    aggregates.set(guid, {
+      value: group.values.reduce((a, b) => a + b, 0) / group.values.length,
+      datetime: group.oldestDatetime,
+    });
+  }
+  return aggregates;
+}
+
+// spaceGuid付きの値の束を空間ボクセル(あれば)/Storey配下要素(空間ジオメトリが
+// 無いモデルのフォールバック、digital-twin-spec.md §5.4)へ集計・着色する。
+// 集計そのもの(平均)は`ifc2usd.space_heatmap.aggregate_values_by_space`の
+// クライアント側の対（サーバー側はこの集計をSSRせず生の値の束を返すため、
+// ビューワー自身が同じロジックを持つ）。色計算自体はE9-4の`_valueToLiveColor`
+// （turbo LUT + staleデサチュレーション）をそのまま再利用する。
+function applySpaceValues(values, nowMs) {
+  const aggregates = _aggregateMeanBySpaceGuid(values);
+  if (aggregates.size === 0) return;
+
+  const nums = [...aggregates.values()].map((a) => a.value).sort((a, b) => a - b);
+  const percentile = (q) => nums[Math.min(nums.length - 1, Math.floor(q * (nums.length - 1)))];
+  let min = percentile(0.05);
+  let max = percentile(0.95);
+  if (max === min) max = min + 1;
+
+  const staleThresholdMs = (liveTwinConfig.staleThresholdSeconds ?? 30) * 1000;
+  const lod = _activeSpaceVoxelLod();
+  const color = new THREE.Color();
+  let coloredAnyVoxel = false;
+
+  for (const [guid, agg] of aggregates) {
+    const rgb = _valueToLiveColor(agg.value, min, max, agg.datetime, nowMs, staleThresholdMs);
+    const voxelIndices = lod?.instanceIndicesByGuid.get(guid);
+    if (voxelIndices) {
+      color.setRGB(rgb[0], rgb[1], rgb[2]);
+      for (const instanceIndex of voxelIndices) lod.mesh.setColorAt(instanceIndex, color);
+      coloredAnyVoxel = true;
+      continue;
+    }
+    const elementGuids = _elementGuidsByStoreyGuid.get(guid);
+    if (elementGuids) {
+      for (const elementGuid of elementGuids) _setLiveColorForGuid(elementGuid, rgb);
+    }
+  }
+  if (coloredAnyVoxel && lod.mesh.instanceColor) lod.mesh.instanceColor.needsUpdate = true;
+}
+
 // "mesh" | "voxel" | "both"。複数LODは同じ体積を異なる粒度で表現したものなので、
 // voxel/bothモードでも常にactiveVoxelLodIndexの1つだけを可視にする。
 // 既定値はindex.html側の<input checked>から読み取る（ハードコードして二重管理
@@ -1267,6 +1435,7 @@ function applyDisplayState() {
   if (glbRoot) {
     glbRoot.visible = displayMode === "mesh" || displayMode === "both";
   }
+  _updateSpaceVoxelVisibility();
   const showVoxels = displayMode === "voxel" || displayMode === "both";
   voxelLods.forEach((lod, index) => {
     lod.mesh.visible = showVoxels && index === activeVoxelLodIndex;
@@ -1838,6 +2007,7 @@ async function loadScene() {
 
   buildObjectsByGuid();
   buildNodesByGuid(sceneDescription.tree);
+  _buildStoreyDescendantIndex(sceneDescription.tree);
   renderTree(sceneDescription.tree);
 
   if (sceneDescription.assets.voxels) {
@@ -1868,6 +2038,19 @@ async function loadScene() {
       await loadTwin(sceneDescription.assets.twin);
     } catch (error) {
       console.warn("ifc2usd viewer: failed to load twin.json, continuing without live mode", error);
+    }
+  }
+
+  if (sceneDescription.assets.spaceVoxels) {
+    // spaceVoxelsもtwin/voxels/sdf同様、無ければ既存機能に一切影響しない
+    // 付加的アセット（E9-5）。
+    try {
+      const response = await fetch(sceneDescription.assets.spaceVoxels);
+      if (!response.ok) throw new Error(`failed to load space voxels: ${response.status}`);
+      buildSpaceVoxelLods(await response.json());
+      applyDisplayState(); // 初期visibility(Liveがまだoffなら非表示)を確定する
+    } catch (error) {
+      console.warn("ifc2usd viewer: failed to load space voxels, continuing without them", error);
     }
   }
 
@@ -1915,6 +2098,15 @@ window.ifc2usdViewer = {
       if (color === null) color = mesh.userData.__liveOriginalColor ?? null;
     });
     return color;
+  },
+  getSpaceVoxelLods: () => spaceVoxelLods,
+  getSpaceVoxelInstanceColor: (spaceGuid) => {
+    const lod = _activeSpaceVoxelLod();
+    const indices = lod?.instanceIndicesByGuid.get(spaceGuid);
+    if (!indices || indices.length === 0 || !lod.mesh.instanceColor) return null;
+    const color = new THREE.Color();
+    lod.mesh.getColorAt(indices[0], color);
+    return [color.r, color.g, color.b];
   },
   setGhostModeEnabled: (enabled) => {
     ghostModeEnabled = enabled;

@@ -29,13 +29,14 @@ from tqdm import tqdm
 
 from . import __version__
 from .gltf import export_gltf
-from .ifc import create_settings, get_geometry
+from .ifc import create_settings, get_geometry, get_space_geometry
 from .mapping import MappingValidationError
 from .serve import build_serve_directory, make_server
+from .space_heatmap import build_space_voxel_json
 from .twin import TwinClient, build_twin_json
 from .twin_proxy import TwinProxy, load_twin_config
 from .usd import build_stage, elements_from_stage
-from .voxel import build_voxel_json, build_voxel_stage
+from .voxel import VoxelElement, build_voxel_json, build_voxel_stage, scene_origin
 
 logger = logging.getLogger("ifc2usd")
 
@@ -178,6 +179,83 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     return 0
 
 
+def _default_space_voxel_output(input_path: Path) -> Path:
+    return Path("output") / f"{input_path.stem}_space_voxels.json"
+
+
+def _add_space_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("input_path", type=Path, help="Path to the source .ifc file (for IfcSpace geometry)")
+    parser.add_argument(
+        "--reference", type=Path, required=True,
+        help=(
+            "Path to the converted .usda/.usd for this IFC (used only to derive the shared "
+            "voxel origin/up-axis that voxels.json already uses; never modified)"
+        ),
+    )
+    parser.add_argument(
+        "--size", type=float, action="append", dest="sizes",
+        help="Voxel size in meters (repeatable for multiple LODs; default: 0.5)",
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, default=None,
+        help="Output JSON path (default: output/<name>_space_voxels.json)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+
+def _run_space_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _configure_logging(args.verbose)
+    if not args.input_path.is_file():
+        parser.error(f"IFC file not found: {args.input_path}")
+    if not args.reference.is_file():
+        parser.error(f"reference USD file not found: {args.reference}")
+
+    sizes = args.sizes or [0.5]
+
+    stage = Usd.Stage.Open(str(args.reference))
+    reference_elements = elements_from_stage(stage)
+    if not reference_elements:
+        parser.error(f"no voxelizable elements found in reference USD: {args.reference}")
+    # E9-5: 空間ボクセルは正本のvoxels.jsonと同じシーン共有originを使う
+    # （digital-twin-spec.md §5.4）。空間だけから独立に原点を求めると、
+    # ビューワー上で建物本体と位置がずれてしまう。
+    origin = scene_origin(reference_elements)
+    up_axis = str(UsdGeom.GetStageUpAxis(stage))
+
+    ifc_file = ifcopenshell.open(str(args.input_path))
+    settings = create_settings()
+    spaces = [
+        VoxelElement(guid=guid, cls="IfcSpace", name=name, color=(0.6, 0.6, 0.6), vertices=verts, indices=indices)
+        for guid, name, verts, indices in get_space_geometry(settings, ifc_file, y_up=(up_axis == "Y"))
+    ]
+    if not spaces:
+        parser.error(f"no IfcSpace geometry found in: {args.input_path}")
+
+    try:
+        result = build_space_voxel_json(
+            spaces,
+            sizes=sizes,
+            origin=origin,
+            source={
+                "ifc": args.input_path.name,
+                "reference": args.reference.name,
+                "generator": f"ifc2usd {__version__}",
+            },
+            up_axis=up_axis,
+        )
+    except ValueError as exc:
+        # voxelize_mesh は各空間のAABB最小点がoriginを下回ると生のValueErrorを
+        # 送出する（例: 空間ジオメトリが--referenceの通常要素の範囲より外側に
+        # はみ出す非典型的なモデル）。CLIとしては分かりやすいエラーで終了させる。
+        parser.error(f"failed to voxelize space geometry: {exc}")
+
+    output_path = args.output or _default_space_voxel_output(args.input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    logger.info("Wrote space voxels: %s", output_path)
+    return 0
+
+
 def _default_gltf_output(input_path: Path) -> Path:
     return Path("output") / f"{input_path.stem}.glb"
 
@@ -221,6 +299,13 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
             "path) to enable live digital-twin mode (E9-3)"
         ),
     )
+    parser.add_argument(
+        "--space-voxels", type=Path, default=None,
+        help=(
+            "Path to a space voxels JSON produced by 'ifc2usd space-voxelize' to enable the "
+            "space/voxel heatmap (E9-5); only useful together with --twin"
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
 
 
@@ -228,6 +313,20 @@ def _run_serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     _configure_logging(args.verbose)
     if not args.usd_path.is_file():
         parser.error(f"USD file not found: {args.usd_path}")
+
+    space_voxels_json = None
+    if args.space_voxels:
+        if not args.space_voxels.is_file():
+            parser.error(f"space voxels file not found: {args.space_voxels}")
+        try:
+            space_voxels_json = json.loads(args.space_voxels.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid space voxels file {args.space_voxels}: {exc}")
+        if not isinstance(space_voxels_json.get("lods"), list) or "origin" not in space_voxels_json:
+            parser.error(
+                f"invalid space voxels file {args.space_voxels}: missing/malformed 'lods' or 'origin' "
+                "(expected the JSON produced by 'ifc2usd space-voxelize')"
+            )
 
     twin_json = None
     twin_proxy = None
@@ -251,7 +350,13 @@ def _run_serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
 
     with tempfile.TemporaryDirectory(prefix="ifc2usd_serve_") as tmpdir:
         workdir = Path(tmpdir)
-        build_serve_directory(args.usd_path, workdir, sdf_slices=args.sdf_slices, twin=twin_json)
+        build_serve_directory(
+            args.usd_path,
+            workdir,
+            sdf_slices=args.sdf_slices,
+            twin=twin_json,
+            space_voxels=space_voxels_json,
+        )
 
         try:
             server = make_server(workdir, port=args.port, twin_proxy=twin_proxy)
@@ -295,6 +400,11 @@ _COMMANDS: dict[str, tuple] = {
         _add_export_gltf_arguments,
         _run_export_gltf,
         "Export a converted USD stage to a glTF (GLB) file.",
+    ),
+    "space-voxelize": (
+        _add_space_voxelize_arguments,
+        _run_space_voxelize,
+        "Voxelize IfcSpace geometry (E9-5 space/voxel heatmap prerequisite) into occupancy voxel JSON.",
     ),
     "serve": (
         _add_serve_arguments,
