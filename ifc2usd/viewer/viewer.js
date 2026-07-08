@@ -30,6 +30,13 @@ const liveLegendGradientEl = document.getElementById("live-legend-gradient");
 const liveLegendMinLabel = document.getElementById("live-legend-min");
 const liveLegendMaxLabel = document.getElementById("live-legend-max");
 const liveLegendUnitLabel = document.getElementById("live-legend-unit");
+const playbackToolbarGroup = document.getElementById("playback-toolbar-group");
+const playbackToolbarDivider = document.getElementById("playback-toolbar-divider");
+const playbackDurationSelect = document.getElementById("playback-duration-select");
+const playbackLoadButton = document.getElementById("playback-load-button");
+const playbackPlayToggle = document.getElementById("playback-play-toggle");
+const playbackSlider = document.getElementById("playback-slider");
+const playbackTimeLabel = document.getElementById("playback-time-label");
 
 // デザイントークン(E8-5 / ux-spec.md §3.5): 色はindex.htmlの:rootカスタム
 // プロパティを唯一の定義source とし、ここではgetComputedStyleで初期化時に
@@ -868,6 +875,8 @@ async function loadTwin(twinUrl) {
 
   liveToolbarGroup.style.display = "";
   liveToolbarDivider.style.display = "";
+  playbackToolbarGroup.style.display = "";
+  playbackToolbarDivider.style.display = "";
 }
 
 function _metricDefinition(name) {
@@ -1044,6 +1053,152 @@ liveToggle.addEventListener("change", () => {
 livePauseToggle.addEventListener("change", () => {
   livePaused = livePauseToggle.checked;
   if (!livePaused && liveEnabled) refreshLiveValues();
+});
+
+// --- Playback: 時系列再生 (E9-6, digital-twin-spec.md §5.5) ---
+//
+// 期間+粒度を指定して`/api/twin/history`を対象ポイントぶん一括取得し、
+// フレーム列（時刻ごとの値の束）へ整形してからスライダーで再生する
+// （再生中の逐次fetchはしない）。色適用は`applyColorMappedValues`/
+// `applySpaceValues`をそのまま呼ぶだけで、ライブ専用の処理（fetch/setInterval）
+// は一切含まない——ライブ/再生で表示経路を分岐させないという要件そのもの。
+
+let playbackFrames = []; // [{datetime, values: [...]}] （valuesはbody.valuesと同じ形）
+let playbackMin = 0;
+let playbackMax = 1;
+let playbackTimer = null;
+
+function _stopPlayback() {
+  if (playbackTimer !== null) {
+    clearInterval(playbackTimer);
+    playbackTimer = null;
+  }
+  playbackPlayToggle.textContent = "Play";
+}
+
+// 対象ポイントごとの`/api/twin/history`結果を、時刻の昇順フレーム列へ束ねる。
+// 各ポイントの時刻集合が完全には揃わない（欠測がある）ことを許容し、そのフレームに
+// 実際に値がある対象だけを含める（refreshLiveValues()が毎回全点埋まっている前提で
+// 書かれていないのと同じ理由）。
+function _buildPlaybackFrames(perPointHistory, bindings) {
+  const bindingsByPointId = new Map();
+  for (const binding of bindings) {
+    if (!bindingsByPointId.has(binding.pointId)) bindingsByPointId.set(binding.pointId, []);
+    bindingsByPointId.get(binding.pointId).push(binding);
+  }
+
+  const timestamps = new Set();
+  for (const { history } of perPointHistory) {
+    for (const point of history) timestamps.add(point.datetime);
+  }
+  const sortedTimestamps = [...timestamps].sort();
+
+  return sortedTimestamps.map((datetime) => {
+    const values = [];
+    for (const { pointId, history } of perPointHistory) {
+      const point = history.find((p) => p.datetime === datetime);
+      if (!point || typeof point.value !== "number") continue;
+      for (const binding of bindingsByPointId.get(pointId) ?? []) {
+        const entry = { pointId, value: point.value, datetime };
+        if (binding.target?.guid) entry.guid = binding.target.guid;
+        if (binding.target?.spaceGuid) entry.spaceGuid = binding.target.spaceGuid;
+        values.push(entry);
+      }
+    }
+    return { datetime, values };
+  });
+}
+
+function _applyPlaybackFrame(index) {
+  const frame = playbackFrames[index];
+  if (!frame) return;
+  const nowMs = Date.parse(frame.datetime);
+  applyColorMappedValues(liveMetric, frame.values, playbackMin, playbackMax, nowMs);
+  applySpaceValues(frame.values, nowMs);
+  playbackTimeLabel.textContent = frame.datetime;
+}
+
+async function _loadPlaybackFrames() {
+  if (!liveMetric || !liveTwinConfig) return;
+
+  // Playback読み込み中はLiveポーリングと色の書き込みが競合しないよう止める。
+  if (liveEnabled) {
+    liveToggle.checked = false;
+    liveToggle.dispatchEvent(new Event("change"));
+  }
+
+  const durationHours = Number(playbackDurationSelect.value);
+  const end = new Date();
+  const start = new Date(end.getTime() - durationHours * 60 * 60 * 1000);
+
+  const bindings = liveTwinConfig.bindings.filter((b) => b.metric === liveMetric);
+  const pointIds = [...new Set(bindings.map((b) => b.pointId))];
+
+  playbackLoadButton.disabled = true;
+  try {
+    const perPointHistory = await Promise.all(
+      pointIds.map(async (pointId) => {
+        const url =
+          `./api/twin/history?pointId=${encodeURIComponent(pointId)}` +
+          `&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}` +
+          "&granularity=Hour";
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`failed to fetch history for ${pointId}: ${response.status}`);
+        return { pointId, history: await response.json() };
+      }),
+    );
+
+    playbackFrames = _buildPlaybackFrames(perPointHistory, bindings);
+
+    const metricDef = _metricDefinition(liveMetric);
+    const allValues = playbackFrames.flatMap((f) => f.values.map((v) => v.value));
+    if (metricDef && metricDef.min !== undefined && metricDef.max !== undefined) {
+      playbackMin = metricDef.min;
+      playbackMax = metricDef.max;
+    } else {
+      const sorted = [...allValues].sort((a, b) => a - b);
+      const percentile = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))];
+      playbackMin = sorted.length > 0 ? percentile(0.05) : 0;
+      playbackMax = sorted.length > 0 ? percentile(0.95) : 1;
+      if (playbackMax === playbackMin) playbackMax = playbackMin + 1;
+    }
+
+    playbackSlider.max = String(Math.max(0, playbackFrames.length - 1));
+    playbackSlider.value = "0";
+    playbackSlider.disabled = playbackFrames.length === 0;
+    playbackPlayToggle.disabled = playbackFrames.length === 0;
+    if (playbackFrames.length > 0) _applyPlaybackFrame(0);
+  } catch (error) {
+    console.warn("ifc2usd viewer: failed to load playback frames", error);
+  } finally {
+    playbackLoadButton.disabled = false;
+  }
+}
+
+playbackLoadButton.addEventListener("click", () => {
+  _stopPlayback();
+  _loadPlaybackFrames();
+});
+
+playbackSlider.addEventListener("input", () => {
+  _applyPlaybackFrame(Number(playbackSlider.value));
+});
+
+playbackPlayToggle.addEventListener("click", () => {
+  if (playbackTimer !== null) {
+    _stopPlayback();
+    return;
+  }
+  playbackPlayToggle.textContent = "Pause";
+  playbackTimer = setInterval(() => {
+    const next = Number(playbackSlider.value) + 1;
+    if (next > Number(playbackSlider.max)) {
+      _stopPlayback();
+      return;
+    }
+    playbackSlider.value = String(next);
+    _applyPlaybackFrame(next);
+  }, 500);
 });
 
 function _drawSparkline(canvas, history) {

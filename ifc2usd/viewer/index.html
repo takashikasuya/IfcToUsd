@@ -106,6 +106,8 @@
       .toolbar-group { display: flex; align-items: center; gap: var(--space-2); }
       .toolbar-group-label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 2px; }
       .toolbar-divider { width: 1px; align-self: stretch; background: var(--border); flex: none; }
+      #playback-slider { width: 120px; }
+      #playback-time-label { color: var(--text-dim); font-size: 11px; font-family: monospace; white-space: nowrap; }
 
       #shortcuts-overlay {
         /* #display-controls(左上起点、flex-wrapで折り返す)は狭い幅では
@@ -201,6 +203,19 @@
             <select id="live-metric-select" aria-label="Live metric" title="Metric to color-map onto elements"></select>
             <label title="Enable/disable the live color overlay"><input type="checkbox" id="live-toggle" /> Live</label>
             <label title="Pause polling without clearing the current colors"><input type="checkbox" id="live-pause-toggle" disabled /> Pause</label>
+          </div>
+          <div class="toolbar-divider" id="playback-toolbar-divider" style="display: none"></div>
+          <div class="toolbar-group" id="playback-toolbar-group" title="Playback: replay a historical time range" style="display: none">
+            <span class="toolbar-group-label">Playback</span>
+            <select id="playback-duration-select" aria-label="Playback duration" title="How far back to load history">
+              <option value="1">Last 1h</option>
+              <option value="6">Last 6h</option>
+              <option value="24">Last 24h</option>
+            </select>
+            <button type="button" id="playback-load-button">Load</button>
+            <button type="button" id="playback-play-toggle" disabled>Play</button>
+            <input type="range" id="playback-slider" aria-label="Playback position" min="0" max="0" value="0" disabled />
+            <span id="playback-time-label"></span>
           </div>
         </div>
         <div id="live-legend">
