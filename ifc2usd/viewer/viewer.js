@@ -1034,6 +1034,7 @@ function startLivePolling() {
 
 liveMetricSelect.addEventListener("change", () => {
   liveMetric = liveMetricSelect.value;
+  _resetPlaybackFrames(); // 旧メトリックのフレームを新メトリックの色計算へ流用しない
   if (liveEnabled) refreshLiveValues();
 });
 
@@ -1042,6 +1043,11 @@ liveToggle.addEventListener("change", () => {
   livePauseToggle.disabled = !liveEnabled;
   _updateSpaceVoxelVisibility();
   if (liveEnabled) {
+    // Liveを有効化した瞬間に再生中のsetIntervalが残っていると、両者が
+    // 交互に(異なるメトリック/時刻で)色を書き込み合ってちらつく
+    // （コードレビューで検出）。Playback側がLoad時にLiveを止めるのと対称に、
+    // Live側もPlaybackのタイマーを止める。
+    _stopPlayback();
     startLivePolling();
   } else {
     stopLivePolling();
@@ -1074,6 +1080,22 @@ function _stopPlayback() {
     playbackTimer = null;
   }
   playbackPlayToggle.textContent = "Play";
+}
+
+// メトリック切り替え時（コードレビューで検出: liveMetricSelectのchangeが
+// 再生中のフレームを無効化しないと、凡例/単位だけ新メトリックへ切り替わり
+// 色・値は旧メトリックのフレームのまま、という食い違いが起きる）に呼ぶ。
+// 再読み込みはユーザーに明示的にLoadを押させる（自動再取得はしない——
+// Live同様、通信タイミングを暗黙に発生させないという既存方針に合わせる）。
+function _resetPlaybackFrames() {
+  _stopPlayback();
+  playbackFrames = [];
+  playbackSlider.value = "0";
+  playbackSlider.max = "0";
+  playbackSlider.disabled = true;
+  playbackPlayToggle.disabled = true;
+  playbackTimeLabel.textContent = "";
+  _updateSpaceVoxelVisibility();
 }
 
 // 対象ポイントごとの`/api/twin/history`結果を、時刻の昇順フレーム列へ束ねる。
@@ -1136,7 +1158,11 @@ async function _loadPlaybackFrames() {
 
   playbackLoadButton.disabled = true;
   try {
-    const perPointHistory = await Promise.all(
+    // 1点の取得失敗（上流502等）で全点の履歴を巻き添えに破棄しないよう
+    // Promise.allSettledで各点を独立に扱う（コードレビューで検出:
+    // twin_proxy.get_values()がポイント単位でエラーを隔離するのと同じ
+    // 方針を、ここでも守る）。
+    const settled = await Promise.allSettled(
       pointIds.map(async (pointId) => {
         const url =
           `./api/twin/history?pointId=${encodeURIComponent(pointId)}` +
@@ -1147,11 +1173,22 @@ async function _loadPlaybackFrames() {
         return { pointId, history: await response.json() };
       }),
     );
+    const perPointHistory = [];
+    for (const result of settled) {
+      if (result.status === "fulfilled") {
+        perPointHistory.push(result.value);
+      } else {
+        console.warn("ifc2usd viewer: failed to load playback history for a point", result.reason);
+      }
+    }
 
     playbackFrames = _buildPlaybackFrames(perPointHistory, bindings);
 
     const metricDef = _metricDefinition(liveMetric);
-    const allValues = playbackFrames.flatMap((f) => f.values.map((v) => v.value));
+    // NaN/Infinityは`applyColorMappedValues`の自動min/max決定と同じ理由で除外する
+    // （コードレビューで検出: ここだけ素通しだと1つの異常値でplaybackMin/Maxが
+    // NaNになり、LUT参照が全フレームで壊れる）。
+    const allValues = playbackFrames.flatMap((f) => f.values.map((v) => v.value)).filter((v) => Number.isFinite(v));
     if (metricDef && metricDef.min !== undefined && metricDef.max !== undefined) {
       playbackMin = metricDef.min;
       playbackMax = metricDef.max;
@@ -1167,6 +1204,10 @@ async function _loadPlaybackFrames() {
     playbackSlider.value = "0";
     playbackSlider.disabled = playbackFrames.length === 0;
     playbackPlayToggle.disabled = playbackFrames.length === 0;
+    // 空間ヒートマップの表示条件がliveEnabledだけでなくplaybackFrames.length>0も
+    // 見るようになった（コードレビューで検出）ため、フレーム数が変わった時点で
+    // 再評価する。
+    _updateSpaceVoxelVisibility();
     if (playbackFrames.length > 0) _applyPlaybackFrame(0);
   } catch (error) {
     console.warn("ifc2usd viewer: failed to load playback frames", error);
@@ -1507,8 +1548,13 @@ function _activeSpaceVoxelLod() {
 function _updateSpaceVoxelVisibility() {
   const active = _activeSpaceVoxelLod();
   const showVoxels = displayMode === "voxel" || displayMode === "both";
+  // Playback（E9-6）はLoad時にLiveをOFFにするため（両者が色書き込みを競合
+  // させないように）、liveEnabledだけを条件にすると再生中は空間ヒートマップ
+  // 自体が常に非表示になってしまう。読み込み済みフレームがあれば
+  // （再生中もLoad直後でまだ再生していない状態も含め）表示対象に含める。
+  const colorLayerActive = liveEnabled || playbackFrames.length > 0;
   for (const lod of spaceVoxelLods) {
-    lod.mesh.visible = liveEnabled && showVoxels && lod === active;
+    lod.mesh.visible = colorLayerActive && showVoxels && lod === active;
   }
 }
 

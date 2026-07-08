@@ -185,6 +185,27 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   a Storey via `_setLiveColorForGuid` when a binding's `spaceGuid` resolves to that Storey's own
   GUID (`_buildStoreyDescendantIndex`, built once from `scene.json`'s tree) — digital-twin-spec.md
   §5.4's Storey-level fallback, reusing E9-4's per-object coloring instead of a separate code path.
+  E9-6 (time-series playback) adds a "Playback" toolbar group (same `assets.twin`-gated,
+  hidden-otherwise convention) that fetches `/api/twin/history` once for every point bound to
+  the selected metric (`_loadPlaybackFrames`, `Promise.allSettled` so one point's fetch failure
+  doesn't discard the others' data — mirroring the per-point error isolation
+  `twin_proxy.TwinProxy.get_values()` already does server-side), bins the results into a sorted
+  frame list (`_buildPlaybackFrames`), then lets a slider/play-button scrub through them with
+  zero further network calls. `_applyPlaybackFrame` calls the *same*
+  `applyColorMappedValues`/`applySpaceValues` functions E9-4/E9-5 use, passing the frame's own
+  timestamp as `nowMs` instead of `Date.now()` — this is the reason those functions took an
+  explicit `nowMs` parameter in the first place (digital-twin-spec.md §5.5). Because Live
+  polling and Playback scrubbing both ultimately write through `_setLiveColorForGuid`/
+  `applySpaceValues`, the two must never run concurrently: enabling Live stops any running
+  playback `setInterval` and vice versa (`_loadPlaybackFrames` unchecks `#live-toggle` before
+  fetching; the `liveToggle` "change" handler calls `_stopPlayback()` before starting live
+  polling). Loading playback frames also invalidates any previously-loaded frames from a
+  different metric — `liveMetricSelect`'s "change" handler resets the slider back to disabled
+  rather than leaving stale frames from the old metric paired with the new metric's legend/unit.
+  `_updateSpaceVoxelVisibility()` gates the E9-5 space-heatmap layer on
+  `liveEnabled || playbackFrames.length > 0`, not `liveEnabled` alone — otherwise the space
+  heatmap would never render during playback, since loading playback frames always forces Live
+  off first.
 
 ### ifcopenshell 0.8 specifics (breaking vs. the old notebook API)
 
@@ -264,14 +285,14 @@ voxel-near-black rendering bug fix (Issue #39). Epic E8 (viewer UX/design overha
 improvements, toolbar grouping/design tokens/keyboard shortcuts) is fully done (E8-1 through
 E8-6). Epic E9 (building-OS digital twin mode, `docs/viewer/digital-twin-spec.md` — GUTP
 Building OS RI integration; note the researched fact that its data model carries no IFC
-GUIDs, so the GUID↔point mapping layer is ours) has E9-1 through E9-5 implemented: `twin.py`
+GUIDs, so the GUID↔point mapping layer is ours) is fully done, E9-1 through E9-6: `twin.py`
 (Building OS REST adapter + `twin.json` schema), `mapping.py` (mapping.json's 3 generator
 paths), `twin_proxy.py` + `serve --twin` (whitelisted same-origin proxy with per-metric
-TTL/stale caching), the viewer's "Live" object color-mapping + legend + Live Data panel, and
+TTL/stale caching), the viewer's "Live" object color-mapping + legend + Live Data panel,
 `space_heatmap.py` + `ifc2usd space-voxelize` + the viewer's room-level voxel heatmap
-(E9-5, which finally implements E5-4 / closes Issue #30). E9-6 (time-series playback) remains
-unimplemented — split it into its own issue before starting, following the E5/E6/E9 precedent.
-Consult `docs/viewer/spec.md` before extending viewer-related features.
+(E9-5, which finally implements E5-4 / closes Issue #30), and the viewer's "Playback" toolbar
+group for scrubbing through `/api/twin/history` (E9-6). Consult `docs/viewer/spec.md` before
+extending viewer-related features.
 
 ## Out of scope
 
