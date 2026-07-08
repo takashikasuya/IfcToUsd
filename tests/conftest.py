@@ -112,6 +112,10 @@ TWIN_HISTORY = {
 }
 TWIN_RESOURCES_BY_CUSTOM_TAG = {
     "guid:2AeZbGoSL7": [{"dtId": "point-temp-1", "customTags": ["guid:2AeZbGoSL7"]}],
+    "guid:ambiguous-guid": [
+        {"dtId": "point-a", "customTags": ["guid:ambiguous-guid"]},
+        {"dtId": "point-b", "customTags": ["guid:ambiguous-guid"]},
+    ],
 }
 TWIN_RESOURCES_BY_QUERY = {
     "temperature": [{"dtId": "point-temp-1", "name": "Temperature"}],
@@ -164,8 +168,11 @@ class _TwinMockHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self._respond(200, TWIN_HISTORY.get(point_id, []))
         elif path == "/resources/search":
-            if qs.get("customTags") is not None:
-                self._respond(200, TWIN_RESOURCES_BY_CUSTOM_TAG.get(qs.get("customTags"), []))
+            custom_tags = qs.get("customTags")
+            if custom_tags == "guid:trigger-500":
+                self._respond(500, {"error": "boom"})
+            elif custom_tags is not None:
+                self._respond(200, TWIN_RESOURCES_BY_CUSTOM_TAG.get(custom_tags, []))
             else:
                 self._respond(200, TWIN_RESOURCES_BY_QUERY.get(qs.get("q"), []))
         else:
