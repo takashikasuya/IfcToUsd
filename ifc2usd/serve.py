@@ -12,8 +12,9 @@ import http.server
 import json
 import logging
 import shutil
+import urllib.parse
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from pxr import Usd, UsdGeom
 
@@ -21,6 +22,8 @@ from . import __version__
 from .gltf import export_gltf
 from .scene_index import build_scene_json
 from .sdf_slice import build_sdf_slices_json
+from .twin import TwinApiError
+from .twin_proxy import TwinProxy
 from .usd import elements_from_stage
 from .voxel import build_voxel_json
 
@@ -45,6 +48,8 @@ def build_serve_directory(
     workdir: Path,
     voxel_sizes: Sequence[float] = _DEFAULT_VOXEL_SIZES,
     sdf_slices: bool = False,
+    twin: Mapping | None = None,
+    space_voxels: Mapping | None = None,
 ) -> Path:
     """USD から scene.json/GLB/voxels.json を生成し、静的ビューワーアセットと共に
     `workdir` へ配置する。`workdir` は既存の空ディレクトリを想定する。
@@ -58,6 +63,20 @@ def build_serve_directory(
     追加で計算し `<stem>_sdf.json` を生成する。voxels.json と異なり既定で無効：
     narrow-band SDF構築は要素ごとに追加の占有ボクセル化2回（表面/内部）を要し、
     通常の変換・閲覧フローには不要なコストのため、明示的に要求されたときだけ払う。
+
+    `twin`（E9-3、digital-twin-spec.md §4.2）に`build_twin_json()`が返す辞書を
+    渡すと`<stem>_twin.json`として焼き込み、`scene.json`の`assets.twin`から
+    参照できるようにする。voxels.json/sdf.jsonと同じ「付加的アセット」の規約:
+    値そのものは含めない静的マニフェストで、トークン/クレデンシャルは
+    （`--twin twin-config.json`にのみ存在し）ここには一切現れない。
+
+    `space_voxels`（E9-5、digital-twin-spec.md §5.4）に`space_heatmap.
+    build_space_voxel_json()`が返す辞書を渡すと`<stem>_space_voxels.json`として
+    焼き込み、`scene.json`の`assets.spaceVoxels`から参照できるようにする。
+    IfcSpaceジオメトリは正本USD（この関数が開く`usd_path`）には含まれない
+    （`get_geometry()`が除外するため）ので、この関数自身では計算できない——
+    呼び出し側が`ifc2usd space-voxelize`（別途、元のIFCから）で事前に構築した
+    ものを渡す想定。
 
     Raises:
         FileNotFoundError: `usd_path` が存在しない場合。CLI(`serve`)は事前に
@@ -97,6 +116,39 @@ def build_serve_directory(
         (workdir / sdf_name).write_text(json.dumps(sdf, ensure_ascii=False), encoding="utf-8")
         assets["sdf"] = sdf_name
 
+    if twin is not None:
+        twin_name = f"{usd_path.stem}_twin.json"
+        (workdir / twin_name).write_text(json.dumps(twin, ensure_ascii=False), encoding="utf-8")
+        assets["twin"] = twin_name
+
+    if space_voxels is not None:
+        space_voxels_name = f"{usd_path.stem}_space_voxels.json"
+        # digital-twin-spec.md §5.4はspace_voxelsが正本のvoxels.jsonと同じシーン
+        # 共有origin/upAxisであることを要求する。ここで一致しない場合、ヒートマップは
+        # 建物本体とずれて描画されてしまうが、そのズレは実行時に検出する手段が
+        # ビューワー側に無い（付加的アセットとして中身を信用する設計のため）。
+        # 唯一検出できるこの時点で、サーバーログに警告として残す
+        # （既存の"twin無しでも動く"のと同じ理由で、致命的エラーにはしない）。
+        expected_up_axis = str(UsdGeom.GetStageUpAxis(stage))
+        if space_voxels.get("upAxis") != expected_up_axis:
+            logger.warning(
+                "space_voxels upAxis (%s) does not match %s's upAxis (%s); "
+                "the space heatmap will likely be misaligned. Rebuild it with "
+                "'ifc2usd space-voxelize --reference %s'.",
+                space_voxels.get("upAxis"), usd_path.name, expected_up_axis, usd_path.name,
+            )
+        if "voxels" in assets and space_voxels.get("origin") != voxels["origin"]:
+            logger.warning(
+                "space_voxels origin %s does not match %s's voxels.json origin %s; "
+                "the space heatmap will likely be misaligned. Rebuild it with "
+                "'ifc2usd space-voxelize --reference %s'.",
+                space_voxels.get("origin"), usd_path.name, voxels["origin"], usd_path.name,
+            )
+        (workdir / space_voxels_name).write_text(
+            json.dumps(space_voxels, ensure_ascii=False), encoding="utf-8"
+        )
+        assets["spaceVoxels"] = space_voxels_name
+
     scene = build_scene_json(stage, assets=assets)
     (workdir / "scene.json").write_text(json.dumps(scene, ensure_ascii=False), encoding="utf-8")
 
@@ -118,11 +170,86 @@ class _NoDirectoryListingHandler(http.server.SimpleHTTPRequestHandler):
         return None
 
 
-def make_server(directory: Path, port: int = 8000) -> http.server.ThreadingHTTPServer:
+class _TwinProxyHandler(_NoDirectoryListingHandler):
+    """`_NoDirectoryListingHandler`に`/api/twin/*`プロキシを足した版（E9-3）。
+
+    ホワイトリスト方式: `/api/twin/values`・`/api/twin/history`以外は静的配信へ
+    フォールスルーする（制御APIはそもそも実装しない=中継されない、という設計）。
+    """
+
+    def __init__(self, *args, twin_proxy: TwinProxy, **kwargs) -> None:
+        self.twin_proxy = twin_proxy
+        super().__init__(*args, **kwargs)
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlibのオーバーライド
+        parsed = urllib.parse.urlparse(self.path)
+        qs = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+
+        if parsed.path == "/api/twin/values":
+            self._handle_values(qs)
+        elif parsed.path == "/api/twin/history":
+            self._handle_history(qs)
+        else:
+            super().do_GET()
+
+    def _handle_values(self, qs: dict) -> None:
+        metric = qs.get("metric")
+        if not metric:
+            self._respond_json(400, {"error": "metric query parameter is required"})
+            return
+        try:
+            result = self.twin_proxy.get_values(metric)
+        except TwinApiError as exc:
+            # str(exc)にはビルOSのbase_url（+パス+クエリ）が含まれるため、
+            # ブラウザへは一般的な文言のみ返し、詳細はサーバー側ログにのみ残す
+            # （digital-twin-spec.md §6: ビルOSのURL・クレデンシャルはサーバー
+            # 側の設定ファイルにのみ存在させる）。
+            logger.warning("twin proxy: /api/twin/values?metric=%s failed: %s", metric, exc)
+            self._respond_json(502, {"error": "upstream Building OS request failed"})
+            return
+        self._respond_json(200, result)
+
+    def _handle_history(self, qs: dict) -> None:
+        point_id = qs.get("pointId")
+        start = qs.get("start")
+        end = qs.get("end")
+        if not point_id or not start or not end:
+            self._respond_json(400, {"error": "pointId, start, end query parameters are required"})
+            return
+        granularity = qs.get("granularity", "None")
+        try:
+            result = self.twin_proxy.get_history(point_id, start=start, end=end, granularity=granularity)
+        except TwinApiError as exc:
+            logger.warning("twin proxy: /api/twin/history?pointId=%s failed: %s", point_id, exc)
+            self._respond_json(502, {"error": "upstream Building OS request failed"})
+            return
+        self._respond_json(200, result)
+
+    def _respond_json(self, status: int, payload) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def make_server(
+    directory: Path,
+    port: int = 8000,
+    twin_proxy: TwinProxy | None = None,
+) -> http.server.ThreadingHTTPServer:
     """`directory` を静的配信する HTTP サーバーを構築する（起動はしない）。
 
     127.0.0.1 にのみバインドする（外部ネットワークからの意図しない
     アクセスを避けるため）。`port=0` を渡すと OS が空きポートを選ぶ。
+
+    `twin_proxy`が与えられた場合のみ`/api/twin/*`プロキシを追加する
+    （既定`None`のときは既存の静的配信ハンドラと完全に同一——twinアセットが
+    無い場合の既存ビューワー機能の無変化を保つ）。
     """
-    handler = functools.partial(_NoDirectoryListingHandler, directory=str(directory))
+    if twin_proxy is not None:
+        handler = functools.partial(_TwinProxyHandler, directory=str(directory), twin_proxy=twin_proxy)
+    else:
+        handler = functools.partial(_NoDirectoryListingHandler, directory=str(directory))
     return http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)

@@ -95,3 +95,70 @@ def test_default_output_path_without_subcommand(monkeypatch, tmp_path):
     exit_code = main([str(FIXTURE.resolve())])
     assert exit_code == 0
     assert (tmp_path / "output" / "minimal_structured.usda").is_file()
+
+
+def test_serve_twin_config_missing_file_errors(tmp_path):
+    """`serve --twin`（E9-3）: 設定ファイルが存在しない場合はサーバーを起動する前に
+    分かりやすいエラーで終了する。"""
+    usda = tmp_path / "minimal.usda"
+    main(["convert", str(FIXTURE), "-o", str(usda)])
+
+    missing_config = tmp_path / "does_not_exist_twin_config.json"
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", str(usda), "--twin", str(missing_config)])
+    assert excinfo.value.code != 0
+
+
+def test_serve_twin_config_missing_mapping_key_errors_cleanly(tmp_path):
+    """`--twin`の設定ファイルが不正（`mapping`キー欠落等）でも、生のtracebackでは
+    なく分かりやすいエラーで終了する。"""
+    import json
+
+    usda = tmp_path / "minimal.usda"
+    main(["convert", str(FIXTURE), "-o", str(usda)])
+
+    bad_config = tmp_path / "twin-config.json"
+    bad_config.write_text(json.dumps({"buildingOs": {"baseUrl": "http://localhost:5000"}}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", str(usda), "--twin", str(bad_config)])
+    assert excinfo.value.code != 0
+
+
+def test_serve_space_voxels_missing_file_errors(tmp_path):
+    """`serve --space-voxels`（E9-5）: ファイルが存在しない場合はサーバーを
+    起動する前に分かりやすいエラーで終了する。"""
+    usda = tmp_path / "minimal.usda"
+    main(["convert", str(FIXTURE), "-o", str(usda)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", str(usda), "--space-voxels", str(tmp_path / "does_not_exist.json")])
+    assert excinfo.value.code != 0
+
+
+def test_serve_space_voxels_invalid_json_errors_cleanly(tmp_path):
+    usda = tmp_path / "minimal.usda"
+    main(["convert", str(FIXTURE), "-o", str(usda)])
+
+    bad_json = tmp_path / "space_voxels.json"
+    bad_json.write_text("not valid json{{", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", str(usda), "--space-voxels", str(bad_json)])
+    assert excinfo.value.code != 0
+
+
+def test_serve_space_voxels_missing_lods_key_errors_cleanly(tmp_path):
+    """コードレビューで検出: 構文的には正しいJSONでも`lods`が無い/不正な形なら、
+    ビューワー側で失敗が起きる前にCLIで分かりやすく落とす。"""
+    import json
+
+    usda = tmp_path / "minimal.usda"
+    main(["convert", str(FIXTURE), "-o", str(usda)])
+
+    malformed = tmp_path / "space_voxels.json"
+    malformed.write_text(json.dumps({"version": 3}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", str(usda), "--space-voxels", str(malformed)])
+    assert excinfo.value.code != 0

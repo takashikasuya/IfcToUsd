@@ -20,6 +20,23 @@ const ghostToggle = document.getElementById("ghost-toggle");
 const treePanelToggle = document.getElementById("tree-panel-toggle");
 const propertyPanelToggle = document.getElementById("property-panel-toggle");
 const shortcutsOverlay = document.getElementById("shortcuts-overlay");
+const liveToolbarGroup = document.getElementById("live-toolbar-group");
+const liveToolbarDivider = document.getElementById("live-toolbar-divider");
+const liveMetricSelect = document.getElementById("live-metric-select");
+const liveToggle = document.getElementById("live-toggle");
+const livePauseToggle = document.getElementById("live-pause-toggle");
+const liveLegend = document.getElementById("live-legend");
+const liveLegendGradientEl = document.getElementById("live-legend-gradient");
+const liveLegendMinLabel = document.getElementById("live-legend-min");
+const liveLegendMaxLabel = document.getElementById("live-legend-max");
+const liveLegendUnitLabel = document.getElementById("live-legend-unit");
+const playbackToolbarGroup = document.getElementById("playback-toolbar-group");
+const playbackToolbarDivider = document.getElementById("playback-toolbar-divider");
+const playbackDurationSelect = document.getElementById("playback-duration-select");
+const playbackLoadButton = document.getElementById("playback-load-button");
+const playbackPlayToggle = document.getElementById("playback-play-toggle");
+const playbackSlider = document.getElementById("playback-slider");
+const playbackTimeLabel = document.getElementById("playback-time-label");
 
 // デザイントークン(E8-5 / ux-spec.md §3.5): 色はindex.htmlの:rootカスタム
 // プロパティを唯一の定義source とし、ここではgetComputedStyleで初期化時に
@@ -199,6 +216,28 @@ const _parentGuidByGuid = new Map();
 // （renderTreeNode内のクロージャ変数に頼らずDOM状態を単一の真実source にする）。
 const _liByGuid = new Map();
 
+// Storey GUID -> 配下の要素(Storey自身を除く)GUIDの列。空間ジオメトリが取れない
+// モデル向けのフォールバック集計（E9-5、digital-twin-spec.md §5.4「Storey単位の
+// フォールバック集計」）に使う——`mapping.json`のspaceGuidバインディングが
+// IfcSpaceの代わりにStorey GUIDを指している場合、その値をStorey配下の全要素
+// メッシュへE9-4のオブジェクト色マッピングと同じ経路で適用する。
+const _elementGuidsByStoreyGuid = new Map();
+
+function _buildStoreyDescendantIndex(tree) {
+  _elementGuidsByStoreyGuid.clear();
+  function walk(nodes, currentStoreyGuid) {
+    for (const node of nodes) {
+      const storeyGuid = node.class === "IfcBuildingStorey" ? node.guid : currentStoreyGuid;
+      if (storeyGuid !== null && node.class !== "IfcBuildingStorey") {
+        if (!_elementGuidsByStoreyGuid.has(storeyGuid)) _elementGuidsByStoreyGuid.set(storeyGuid, []);
+        _elementGuidsByStoreyGuid.get(storeyGuid).push(node.guid);
+      }
+      walk(node.children, storeyGuid);
+    }
+  }
+  walk(tree, null);
+}
+
 function buildNodesByGuid(tree) {
   nodesByGuid.clear();
   _parentGuidByGuid.clear();
@@ -331,12 +370,12 @@ function renderPropertyPanel(guid) {
 
   propertyPanel.appendChild(dl);
 
-  // E9(ビルOS連携デジタルツイン)用: Live Dataセクションの挿入位置を確保する。
-  // 現時点では空のプレースホルダ(digital-twin-spec.md参照、このストーリーの
-  // スコープ外)。
+  // ビルOS連携デジタルツイン(Epic E9)のLive Dataセクション。twin.jsonが無い/
+  // このGUIDにバインディングが無い場合は_updateLiveDataSection内で空のままにする。
   const liveData = document.createElement("div");
   liveData.id = "property-live-data";
   propertyPanel.appendChild(liveData);
+  _updateLiveDataSection(guid);
 }
 
 let selectedGuid = null;
@@ -758,6 +797,535 @@ async function loadSdfSlices(sdfUrl) {
   }
 }
 
+// --- Live: ビルOS連携デジタルツイン表示 (E9-4, digital-twin-spec.md §5.1-§5.3) ---
+
+// turbo系カラーマップの多項式近似 (Anton Mikhailov / Google Research, 2019, Apache-2.0
+// "Turbo, An Improved Rainbow Colormap for Visualization"を移植)。外部ファイル・
+// CDN依存なしで256エントリのLUTを事前計算する（build_twin_json()のcolormap名
+// "turbo"に対応する唯一の実装、E9-4の受け入れ条件）。
+function _turboColor(x) {
+  x = Math.min(1, Math.max(0, x));
+  const x2 = x * x;
+  const x3 = x2 * x;
+  const x4 = x2 * x2;
+  const x5 = x3 * x2;
+  const r =
+    0.13572138 + 4.6153926 * x - 42.66032258 * x2 + 132.13108234 * x3 - 152.94239396 * x4 + 59.28637943 * x5;
+  const g =
+    0.09140261 + 2.19418839 * x + 4.84296658 * x2 - 14.18503333 * x3 + 4.27729857 * x4 + 2.82956604 * x5;
+  const b =
+    0.1066733 + 12.64194608 * x - 60.58204836 * x2 + 110.36276771 * x3 - 89.90310912 * x4 + 27.34824973 * x5;
+  return [Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b))];
+}
+
+const TURBO_LUT = Array.from({ length: 256 }, (_, i) => _turboColor(i / 255));
+
+// 凡例のグラデーションバーはCSS linear-gradientで描く（<canvas>にしない）。
+// <canvas>にすると、既存の全PlaywrightテストがWebGL描画結果の画素検証に使う
+// `document.querySelector('#viewport canvas')`（唯一のcanvas要素という前提）が、
+// レンダラーのcanvas(viewport.appendChild(renderer.domElement)でJS実行時に
+// 追加され、DOM順で常にこの凡例より後になる)より先にこちらへマッチしてしまい、
+// 3D描画ではなく凡例バーの画素を検証してしまう（実際に踏んだ回帰）。
+const TURBO_GRADIENT_CSS = (() => {
+  const stops = 16;
+  const parts = [];
+  for (let i = 0; i <= stops; i++) {
+    const t = i / stops;
+    const [r, g, b] = TURBO_LUT[Math.round(t * 255)];
+    parts.push(`rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}) ${Math.round(t * 100)}%`);
+  }
+  return `linear-gradient(to right, ${parts.join(", ")})`;
+})();
+
+// twin.json（build_twin_json()の出力）。scene.jsonにassets.twinが無ければnullの
+// まま（SDFスライスと同じ付加的アセット規約）。
+let liveTwinConfig = null;
+// guid -> [{pointId, metric, target}, ...]（liveTwinConfig.bindingsのtarget.guidで
+// 引けるように整理したもの。プロパティパネルのLive Dataセクション用）。
+const liveBindingsByGuid = new Map();
+let liveEnabled = false;
+let livePaused = false;
+let liveMetric = null;
+let livePollTimer = null;
+
+async function loadTwin(twinUrl) {
+  const response = await fetch(twinUrl);
+  if (!response.ok) {
+    throw new Error(`failed to load twin.json: ${response.status}`);
+  }
+  liveTwinConfig = await response.json();
+
+  liveBindingsByGuid.clear();
+  for (const binding of liveTwinConfig.bindings) {
+    const guid = binding.target && binding.target.guid;
+    if (!guid) continue; // spaceGuidバインディングはE9-5(空間ボクセルヒートマップ)のスコープ
+    if (!liveBindingsByGuid.has(guid)) liveBindingsByGuid.set(guid, []);
+    liveBindingsByGuid.get(guid).push(binding);
+  }
+
+  liveMetricSelect.innerHTML = "";
+  for (const metric of liveTwinConfig.metrics) {
+    const option = document.createElement("option");
+    option.value = metric.name;
+    option.textContent = metric.name;
+    liveMetricSelect.appendChild(option);
+  }
+  liveMetric = liveTwinConfig.metrics.length > 0 ? liveTwinConfig.metrics[0].name : null;
+  if (liveMetric) liveMetricSelect.value = liveMetric;
+
+  liveToolbarGroup.style.display = "";
+  liveToolbarDivider.style.display = "";
+  playbackToolbarGroup.style.display = "";
+  playbackToolbarDivider.style.display = "";
+}
+
+function _metricDefinition(name) {
+  return liveTwinConfig.metrics.find((m) => m.name === name);
+}
+
+// gltf.py/usd.pyのマテリアル重複排除（_ensureOwnMaterial参照）と同じ理由で、
+// 値の色を書き込む前にメッシュ専有のマテリアルを確保し、元の色は
+// mesh.userData.__liveOriginalColorへ一度だけ退避する（ゴースト/ホバー等の
+// 既存パターンと同じuserData退避方式）。
+//
+// ゴースト中のメッシュは`mesh.material`が全要素で共有される単一の
+// `_ghostMaterial`を指す（_setMeshGhosted参照）。ここでガードせずに
+// `.color`を書き換えると、ゴースト中の全要素の色がこの1要素の値色で
+// 汚染されてしまう（selectByGuidがhighlightMesh適用前に
+// `_setMeshGhosted(mesh, false)`で選択要素自身のゴーストを解除している
+// のと同じ種類の罠）。ゴースト中は単に何もしない——ゴースト解除後の
+// 次回ポーリングで正しく着色される。
+function _setLiveColorForGuid(guid, rgb) {
+  forEachMeshOf(guid, (mesh) => {
+    if (mesh.material === _ghostMaterial) return;
+    _ensureOwnMaterial(mesh);
+    if (mesh.userData.__liveOriginalColor === undefined) {
+      mesh.userData.__liveOriginalColor = mesh.material.color.clone();
+    }
+    mesh.material.color.setRGB(rgb[0], rgb[1], rgb[2]);
+  });
+}
+
+function clearLiveColors() {
+  for (const guid of liveBindingsByGuid.keys()) {
+    forEachMeshOf(guid, (mesh) => {
+      if (mesh.material === _ghostMaterial) return;
+      if (mesh.userData.__liveOriginalColor !== undefined) {
+        mesh.material.color.copy(mesh.userData.__liveOriginalColor);
+      }
+    });
+  }
+}
+
+function _formatLiveNumber(n) {
+  return Number.isFinite(n) ? n.toFixed(1) : String(n);
+}
+
+function updateLiveLegend(metricDef, min, max) {
+  liveLegendGradientEl.style.background = TURBO_GRADIENT_CSS;
+  liveLegendMinLabel.textContent = _formatLiveNumber(min);
+  liveLegendMaxLabel.textContent = _formatLiveNumber(max);
+  liveLegendUnitLabel.textContent = (metricDef && metricDef.unit) || "";
+  // index.htmlの`#live-legend`はCSSルール側で`display: none`を持つ（インライン
+  // styleではない）ため、`.style.display = ""`はそれを覆せない
+  // （liveToolbarGroup/liveToolbarDividerはインラインstyleでdisplay:noneを
+  // 持つため空文字列に戻すだけでよいが、こちらは明示的な値が必要）。
+  liveLegend.style.display = "block";
+}
+
+// digital-twin-spec.md §5.2: 「動いているように見えて実は止まっている」事故を
+// 防ぐため、datetimeがポーリング間隔×3(既定のstaleThresholdSeconds)より古い値は
+// 彩度を落とした灰色寄りに描画する。
+function _desaturateIfStale(rgb, datetime, nowMs, staleThresholdMs) {
+  const isStale = nowMs - Date.parse(datetime) > staleThresholdMs;
+  if (!isStale) return rgb;
+  const gray = (rgb[0] + rgb[1] + rgb[2]) / 3;
+  const amount = 0.7;
+  return rgb.map((c) => c + (gray - c) * amount);
+}
+
+function _valueToLiveColor(value, min, max, datetime, nowMs, staleThresholdMs) {
+  const t = (value - min) / (max - min);
+  const lutIndex = Math.round(Math.min(1, Math.max(0, t)) * 255);
+  return _desaturateIfStale(TURBO_LUT[lutIndex], datetime, nowMs, staleThresholdMs);
+}
+
+// 値の束を色へ変換して要素へ適用する共通処理。digital-twin-spec.md §5.5
+// 「色適用関数はE9-4と共通化し、ライブ/再生で表示経路を分岐させない」に対応する
+// 唯一の実装——E9-6(時系列再生)はポーリングではなくここへ履歴フレームの値と
+// その時点の`nowMs`(再生ヘッドの時刻。実時刻ではない)を渡して呼ぶだけになる
+// ように、fetch/setIntervalなどポーリング固有の処理は一切含めない。
+function applyColorMappedValues(metric, values, minOverride, maxOverride, nowMs) {
+  const metricDef = _metricDefinition(metric);
+  let min = minOverride;
+  let max = maxOverride;
+  if (min === undefined || min === null || max === undefined || max === null) {
+    // digital-twin-spec.md §5.2: min/max未指定なら受信値のP5〜P95で自動決定する。
+    // NaN/Infinityは`typeof`ではnumberだが順序比較が意味を持たないため、
+    // Number.isFinite()で明示的に除外する(バックエンド由来の異常値で
+    // min/maxそのものがNaNになりLUT参照が壊れるのを防ぐ)。
+    const nums = values
+      .map((v) => v.value)
+      .filter((v) => typeof v === "number" && Number.isFinite(v))
+      .sort((a, b) => a - b);
+    const percentile = (q) => nums[Math.min(nums.length - 1, Math.floor(q * (nums.length - 1)))];
+    min = nums.length > 0 ? percentile(0.05) : 0;
+    max = nums.length > 0 ? percentile(0.95) : 1;
+  }
+  if (max === min) max = min + 1; // ゼロ除算回避（全点が同一値の場合）
+
+  const staleThresholdMs = (liveTwinConfig.staleThresholdSeconds ?? 30) * 1000;
+
+  for (const entry of values) {
+    if (!entry.guid) continue; // spaceGuidの集計表示はE9-5のスコープ
+    const rgb = _valueToLiveColor(entry.value, min, max, entry.datetime, nowMs, staleThresholdMs);
+    _setLiveColorForGuid(entry.guid, rgb);
+  }
+
+  updateLiveLegend(metricDef, min, max);
+}
+
+function applyLiveValues(body) {
+  const metricDef = _metricDefinition(body.metric);
+  applyColorMappedValues(
+    body.metric,
+    body.values,
+    metricDef && metricDef.min,
+    metricDef && metricDef.max,
+    Date.now(),
+  );
+}
+
+const _LIVE_TOGGLE_DEFAULT_TITLE = liveToggle.title;
+
+async function refreshLiveValues() {
+  if (!liveMetric) return;
+  try {
+    const response = await fetch(`./api/twin/values?metric=${encodeURIComponent(liveMetric)}`);
+    if (!response.ok) throw new Error(`failed to fetch live values: ${response.status}`);
+    const body = await response.json();
+    applyLiveValues(body);
+    applySpaceValues(body.values, Date.now());
+    liveToggle.title = _LIVE_TOGGLE_DEFAULT_TITLE;
+  } catch (error) {
+    // ポーリングが繰り返し失敗しても、チェックボックス自体はON表示のまま
+    // (盤面は最後に成功した値のまま静止する)なので、consoleを見ない限り
+    // 気付けない「動いているように見えて実は止まっている」状態になりうる
+    // (digital-twin-spec.md §5.2と同種の事故)。せめてtitleで手掛かりを残す。
+    console.warn("ifc2usd viewer: failed to refresh live values", error);
+    liveToggle.title = `${_LIVE_TOGGLE_DEFAULT_TITLE} (last refresh failed — see console)`;
+  }
+}
+
+function stopLivePolling() {
+  if (livePollTimer !== null) {
+    clearInterval(livePollTimer);
+    livePollTimer = null;
+  }
+}
+
+function startLivePolling() {
+  refreshLiveValues();
+  const intervalMs = (liveTwinConfig.pollIntervalSeconds || 10) * 1000;
+  livePollTimer = setInterval(() => {
+    if (!livePaused) refreshLiveValues();
+  }, intervalMs);
+}
+
+liveMetricSelect.addEventListener("change", () => {
+  liveMetric = liveMetricSelect.value;
+  _resetPlaybackFrames(); // 旧メトリックのフレームを新メトリックの色計算へ流用しない
+  if (liveEnabled) refreshLiveValues();
+});
+
+liveToggle.addEventListener("change", () => {
+  liveEnabled = liveToggle.checked;
+  livePauseToggle.disabled = !liveEnabled;
+  _updateSpaceVoxelVisibility();
+  if (liveEnabled) {
+    // Liveを有効化した瞬間に再生中のsetIntervalが残っていると、両者が
+    // 交互に(異なるメトリック/時刻で)色を書き込み合ってちらつく
+    // （コードレビューで検出）。Playback側がLoad時にLiveを止めるのと対称に、
+    // Live側もPlaybackのタイマーを止める。
+    _stopPlayback();
+    startLivePolling();
+  } else {
+    stopLivePolling();
+    clearLiveColors();
+    liveLegend.style.display = "none";
+  }
+});
+
+livePauseToggle.addEventListener("change", () => {
+  livePaused = livePauseToggle.checked;
+  if (!livePaused && liveEnabled) refreshLiveValues();
+});
+
+// --- Playback: 時系列再生 (E9-6, digital-twin-spec.md §5.5) ---
+//
+// 期間+粒度を指定して`/api/twin/history`を対象ポイントぶん一括取得し、
+// フレーム列（時刻ごとの値の束）へ整形してからスライダーで再生する
+// （再生中の逐次fetchはしない）。色適用は`applyColorMappedValues`/
+// `applySpaceValues`をそのまま呼ぶだけで、ライブ専用の処理（fetch/setInterval）
+// は一切含まない——ライブ/再生で表示経路を分岐させないという要件そのもの。
+
+let playbackFrames = []; // [{datetime, values: [...]}] （valuesはbody.valuesと同じ形）
+let playbackMin = 0;
+let playbackMax = 1;
+let playbackTimer = null;
+
+function _stopPlayback() {
+  if (playbackTimer !== null) {
+    clearInterval(playbackTimer);
+    playbackTimer = null;
+  }
+  playbackPlayToggle.textContent = "Play";
+}
+
+// メトリック切り替え時（コードレビューで検出: liveMetricSelectのchangeが
+// 再生中のフレームを無効化しないと、凡例/単位だけ新メトリックへ切り替わり
+// 色・値は旧メトリックのフレームのまま、という食い違いが起きる）に呼ぶ。
+// 再読み込みはユーザーに明示的にLoadを押させる（自動再取得はしない——
+// Live同様、通信タイミングを暗黙に発生させないという既存方針に合わせる）。
+function _resetPlaybackFrames() {
+  _stopPlayback();
+  playbackFrames = [];
+  playbackSlider.value = "0";
+  playbackSlider.max = "0";
+  playbackSlider.disabled = true;
+  playbackPlayToggle.disabled = true;
+  playbackTimeLabel.textContent = "";
+  _updateSpaceVoxelVisibility();
+}
+
+// 対象ポイントごとの`/api/twin/history`結果を、時刻の昇順フレーム列へ束ねる。
+// 各ポイントの時刻集合が完全には揃わない（欠測がある）ことを許容し、そのフレームに
+// 実際に値がある対象だけを含める（refreshLiveValues()が毎回全点埋まっている前提で
+// 書かれていないのと同じ理由）。
+function _buildPlaybackFrames(perPointHistory, bindings) {
+  const bindingsByPointId = new Map();
+  for (const binding of bindings) {
+    if (!bindingsByPointId.has(binding.pointId)) bindingsByPointId.set(binding.pointId, []);
+    bindingsByPointId.get(binding.pointId).push(binding);
+  }
+
+  const timestamps = new Set();
+  for (const { history } of perPointHistory) {
+    for (const point of history) timestamps.add(point.datetime);
+  }
+  const sortedTimestamps = [...timestamps].sort();
+
+  return sortedTimestamps.map((datetime) => {
+    const values = [];
+    for (const { pointId, history } of perPointHistory) {
+      const point = history.find((p) => p.datetime === datetime);
+      if (!point || typeof point.value !== "number") continue;
+      for (const binding of bindingsByPointId.get(pointId) ?? []) {
+        const entry = { pointId, value: point.value, datetime };
+        if (binding.target?.guid) entry.guid = binding.target.guid;
+        if (binding.target?.spaceGuid) entry.spaceGuid = binding.target.spaceGuid;
+        values.push(entry);
+      }
+    }
+    return { datetime, values };
+  });
+}
+
+function _applyPlaybackFrame(index) {
+  const frame = playbackFrames[index];
+  if (!frame) return;
+  const nowMs = Date.parse(frame.datetime);
+  applyColorMappedValues(liveMetric, frame.values, playbackMin, playbackMax, nowMs);
+  applySpaceValues(frame.values, nowMs);
+  playbackTimeLabel.textContent = frame.datetime;
+}
+
+async function _loadPlaybackFrames() {
+  if (!liveMetric || !liveTwinConfig) return;
+
+  // Playback読み込み中はLiveポーリングと色の書き込みが競合しないよう止める。
+  if (liveEnabled) {
+    liveToggle.checked = false;
+    liveToggle.dispatchEvent(new Event("change"));
+  }
+
+  const durationHours = Number(playbackDurationSelect.value);
+  const end = new Date();
+  const start = new Date(end.getTime() - durationHours * 60 * 60 * 1000);
+
+  const bindings = liveTwinConfig.bindings.filter((b) => b.metric === liveMetric);
+  const pointIds = [...new Set(bindings.map((b) => b.pointId))];
+
+  playbackLoadButton.disabled = true;
+  try {
+    // 1点の取得失敗（上流502等）で全点の履歴を巻き添えに破棄しないよう
+    // Promise.allSettledで各点を独立に扱う（コードレビューで検出:
+    // twin_proxy.get_values()がポイント単位でエラーを隔離するのと同じ
+    // 方針を、ここでも守る）。
+    const settled = await Promise.allSettled(
+      pointIds.map(async (pointId) => {
+        const url =
+          `./api/twin/history?pointId=${encodeURIComponent(pointId)}` +
+          `&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}` +
+          "&granularity=Hour";
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`failed to fetch history for ${pointId}: ${response.status}`);
+        return { pointId, history: await response.json() };
+      }),
+    );
+    const perPointHistory = [];
+    for (const result of settled) {
+      if (result.status === "fulfilled") {
+        perPointHistory.push(result.value);
+      } else {
+        console.warn("ifc2usd viewer: failed to load playback history for a point", result.reason);
+      }
+    }
+
+    playbackFrames = _buildPlaybackFrames(perPointHistory, bindings);
+
+    const metricDef = _metricDefinition(liveMetric);
+    // NaN/Infinityは`applyColorMappedValues`の自動min/max決定と同じ理由で除外する
+    // （コードレビューで検出: ここだけ素通しだと1つの異常値でplaybackMin/Maxが
+    // NaNになり、LUT参照が全フレームで壊れる）。
+    const allValues = playbackFrames.flatMap((f) => f.values.map((v) => v.value)).filter((v) => Number.isFinite(v));
+    if (metricDef && metricDef.min !== undefined && metricDef.max !== undefined) {
+      playbackMin = metricDef.min;
+      playbackMax = metricDef.max;
+    } else {
+      const sorted = [...allValues].sort((a, b) => a - b);
+      const percentile = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))];
+      playbackMin = sorted.length > 0 ? percentile(0.05) : 0;
+      playbackMax = sorted.length > 0 ? percentile(0.95) : 1;
+      if (playbackMax === playbackMin) playbackMax = playbackMin + 1;
+    }
+
+    playbackSlider.max = String(Math.max(0, playbackFrames.length - 1));
+    playbackSlider.value = "0";
+    playbackSlider.disabled = playbackFrames.length === 0;
+    playbackPlayToggle.disabled = playbackFrames.length === 0;
+    // 空間ヒートマップの表示条件がliveEnabledだけでなくplaybackFrames.length>0も
+    // 見るようになった（コードレビューで検出）ため、フレーム数が変わった時点で
+    // 再評価する。
+    _updateSpaceVoxelVisibility();
+    if (playbackFrames.length > 0) _applyPlaybackFrame(0);
+  } catch (error) {
+    console.warn("ifc2usd viewer: failed to load playback frames", error);
+  } finally {
+    playbackLoadButton.disabled = false;
+  }
+}
+
+playbackLoadButton.addEventListener("click", () => {
+  _stopPlayback();
+  _loadPlaybackFrames();
+});
+
+playbackSlider.addEventListener("input", () => {
+  _applyPlaybackFrame(Number(playbackSlider.value));
+});
+
+playbackPlayToggle.addEventListener("click", () => {
+  if (playbackTimer !== null) {
+    _stopPlayback();
+    return;
+  }
+  playbackPlayToggle.textContent = "Pause";
+  playbackTimer = setInterval(() => {
+    const next = Number(playbackSlider.value) + 1;
+    if (next > Number(playbackSlider.max)) {
+      _stopPlayback();
+      return;
+    }
+    playbackSlider.value = String(next);
+    _applyPlaybackFrame(next);
+  }, 500);
+});
+
+function _drawSparkline(canvas, history) {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (history.length < 2) return;
+
+  const values = history.map((h) => h.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  ctx.strokeStyle = _cssVar("--accent", "#3355ff");
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  history.forEach((point, i) => {
+    const x = (i / (history.length - 1)) * canvas.width;
+    const y = canvas.height - ((point.value - min) / range) * canvas.height;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function _populateLiveDataRow(pointId, valueEl, canvas) {
+  try {
+    const end = new Date();
+    const start = new Date(end.getTime() - 60 * 60 * 1000); // 直近1時間
+    const url =
+      `./api/twin/history?pointId=${encodeURIComponent(pointId)}` +
+      `&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}` +
+      "&granularity=None";
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`failed to fetch history: ${response.status}`);
+    const history = await response.json();
+    _drawSparkline(canvas, history);
+    const last = history[history.length - 1];
+    valueEl.textContent = last ? `${last.value} @ ${last.datetime}` : "no data";
+  } catch (error) {
+    console.warn("ifc2usd viewer: failed to load live data history", error);
+    valueEl.textContent = "unavailable";
+  }
+}
+
+// #property-live-data（renderPropertyPanelがプレースホルダとして確保する
+// 空div、E8-4由来）の中身をこのGUIDに紐づくポイントで埋める。twin.jsonが
+// 無い/このGUIDに紐づくポイントが無い場合は空のままにする。
+function _updateLiveDataSection(guid) {
+  const container = document.getElementById("property-live-data");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!liveTwinConfig) return;
+
+  const bindings = liveBindingsByGuid.get(guid) || [];
+  if (bindings.length === 0) return;
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Live Data";
+  container.appendChild(heading);
+
+  for (const binding of bindings) {
+    const row = document.createElement("div");
+    row.className = "property-live-data-row";
+
+    const metricDef = _metricDefinition(binding.metric);
+    const label = document.createElement("div");
+    label.className = "property-live-data-label";
+    label.textContent = metricDef ? `${binding.metric} (${metricDef.unit})` : binding.metric;
+    row.appendChild(label);
+
+    const valueEl = document.createElement("div");
+    valueEl.className = "property-live-data-value";
+    valueEl.textContent = "…";
+    row.appendChild(valueEl);
+
+    const canvas = document.createElement("canvas");
+    canvas.className = "property-live-data-sparkline";
+    canvas.width = 260;
+    canvas.height = 40;
+    row.appendChild(canvas);
+
+    container.appendChild(row);
+    _populateLiveDataRow(binding.pointId, valueEl, canvas);
+  }
+}
+
 // voxels.json のLODごとに1つの THREE.InstancedMesh を割り当てる（1 draw call/LOD、
 // NFR-2）。要素ごとの色は per-instance color として反映する。
 const voxelRoot = new THREE.Group();
@@ -908,6 +1476,154 @@ function buildVoxelLods(voxelDescription) {
   }
 }
 
+// --- Live: 空間/ボクセルヒートマップ (E9-5, digital-twin-spec.md §5.4) ---
+//
+// `assets.spaceVoxels`（`ifc2usd space-voxelize`が生成、正本のvoxels.jsonと
+// 同じv3スキーマ・同一origin規約）を、regularなvoxelRootとは別の
+// spaceVoxelRoot配下へ、同じInstancedMesh方式で読み込む。表示は「Live」
+// トグル(E9-4)に相乗り——新しいツールバー操作は増やさない。
+
+const spaceVoxelRoot = new THREE.Group();
+modelRoot.add(spaceVoxelRoot);
+const spaceVoxelLods = []; // [{size, mesh, instanceIndicesByGuid}]
+
+function buildSpaceVoxelLods(spaceVoxelDescription) {
+  const origin = spaceVoxelDescription.origin;
+  const matrix = new THREE.Matrix4();
+  // 実際の値が届く(refreshLiveValues)までの初期色。要素色と紛れないよう中間グレー。
+  const neutralColor = new THREE.Color(0x888888);
+
+  for (const mesh of spaceVoxelRoot.children) mesh.material?.dispose?.();
+  spaceVoxelRoot.clear();
+  spaceVoxelLods.length = 0;
+
+  for (const lod of spaceVoxelDescription.lods) {
+    const size = lod.size;
+    const elementCodes = lod.elements.map((el) => decodeMortonIndices(el.indices));
+    const totalInstances = elementCodes.reduce((sum, codes) => sum + codes.length, 0);
+
+    // buildVoxelLods()と同じ理由でvertexColors:trueは指定しない(Issue #39/E8-6)。
+    const material = new THREE.MeshStandardMaterial();
+    const mesh = new THREE.InstancedMesh(_voxelUnitBox, material, totalInstances);
+    const instanceIndicesByGuid = new Map();
+
+    let instanceIndex = 0;
+    lod.elements.forEach((el, elIndex) => {
+      for (const code of elementCodes[elIndex]) {
+        const [ix, iy, iz] = mortonDecode(code);
+        matrix.makeScale(size, size, size);
+        matrix.setPosition(
+          origin[0] + (ix + 0.5) * size,
+          origin[1] + (iy + 0.5) * size,
+          origin[2] + (iz + 0.5) * size,
+        );
+        mesh.setMatrixAt(instanceIndex, matrix);
+        mesh.setColorAt(instanceIndex, neutralColor);
+        if (!instanceIndicesByGuid.has(el.guid)) instanceIndicesByGuid.set(el.guid, []);
+        instanceIndicesByGuid.get(el.guid).push(instanceIndex);
+        instanceIndex++;
+      }
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.visible = false;
+
+    spaceVoxelRoot.add(mesh);
+    spaceVoxelLods.push({ size, mesh, instanceIndicesByGuid });
+  }
+}
+
+// 現在アクティブな(通常の)ボクセルLODと同じサイズの空間ボクセルLODを選ぶ
+// （既存のLOD切替にそのまま乗る、digital-twin-spec.md §5.4）。sizeが一致する
+// ものが無ければ先頭を使う。
+function _activeSpaceVoxelLod() {
+  const activeLod = voxelLods[activeVoxelLodIndex];
+  if (activeLod) {
+    const matching = spaceVoxelLods.find((lod) => lod.size === activeLod.size);
+    if (matching) return matching;
+  }
+  return spaceVoxelLods[0];
+}
+
+function _updateSpaceVoxelVisibility() {
+  const active = _activeSpaceVoxelLod();
+  const showVoxels = displayMode === "voxel" || displayMode === "both";
+  // Playback（E9-6）はLoad時にLiveをOFFにするため（両者が色書き込みを競合
+  // させないように）、liveEnabledだけを条件にすると再生中は空間ヒートマップ
+  // 自体が常に非表示になってしまう。読み込み済みフレームがあれば
+  // （再生中もLoad直後でまだ再生していない状態も含め）表示対象に含める。
+  const colorLayerActive = liveEnabled || playbackFrames.length > 0;
+  for (const lod of spaceVoxelLods) {
+    lod.mesh.visible = colorLayerActive && showVoxels && lod === active;
+  }
+}
+
+// spaceGuidごとに平均を取りつつ、集計に寄与した中で最も古いdatetimeも記録する
+// ——「集計値の鮮度は、寄与した中で最も古い値と同じ」という前提で、E9-4の
+// stale判定（_valueToLiveColor経由）をそのまま再利用できるようにするため
+// （digital-twin-spec.md §5.5「色適用関数はライブ/再生で共通化する」に対応:
+// ここでも新しい色計算式を作らずE9-4のものへ委譲する）。
+// NaN/Infinityの値は`applyColorMappedValues`と同じ理由で除外する
+// （min/maxの汚染・座標を持たないLUT参照を防ぐ）。
+function _aggregateMeanBySpaceGuid(values) {
+  const groups = new Map();
+  for (const entry of values) {
+    if (!entry.spaceGuid || typeof entry.value !== "number" || !Number.isFinite(entry.value)) continue;
+    if (!groups.has(entry.spaceGuid)) groups.set(entry.spaceGuid, { values: [], oldestDatetime: entry.datetime });
+    const group = groups.get(entry.spaceGuid);
+    group.values.push(entry.value);
+    if (entry.datetime && (!group.oldestDatetime || Date.parse(entry.datetime) < Date.parse(group.oldestDatetime))) {
+      group.oldestDatetime = entry.datetime;
+    }
+  }
+  const aggregates = new Map();
+  for (const [guid, group] of groups) {
+    aggregates.set(guid, {
+      value: group.values.reduce((a, b) => a + b, 0) / group.values.length,
+      datetime: group.oldestDatetime,
+    });
+  }
+  return aggregates;
+}
+
+// spaceGuid付きの値の束を空間ボクセル(あれば)/Storey配下要素(空間ジオメトリが
+// 無いモデルのフォールバック、digital-twin-spec.md §5.4)へ集計・着色する。
+// 集計そのもの(平均)は`ifc2usd.space_heatmap.aggregate_values_by_space`の
+// クライアント側の対（サーバー側はこの集計をSSRせず生の値の束を返すため、
+// ビューワー自身が同じロジックを持つ）。色計算自体はE9-4の`_valueToLiveColor`
+// （turbo LUT + staleデサチュレーション）をそのまま再利用する。
+function applySpaceValues(values, nowMs) {
+  const aggregates = _aggregateMeanBySpaceGuid(values);
+  if (aggregates.size === 0) return;
+
+  const nums = [...aggregates.values()].map((a) => a.value).sort((a, b) => a - b);
+  const percentile = (q) => nums[Math.min(nums.length - 1, Math.floor(q * (nums.length - 1)))];
+  let min = percentile(0.05);
+  let max = percentile(0.95);
+  if (max === min) max = min + 1;
+
+  const staleThresholdMs = (liveTwinConfig.staleThresholdSeconds ?? 30) * 1000;
+  const lod = _activeSpaceVoxelLod();
+  const color = new THREE.Color();
+  let coloredAnyVoxel = false;
+
+  for (const [guid, agg] of aggregates) {
+    const rgb = _valueToLiveColor(agg.value, min, max, agg.datetime, nowMs, staleThresholdMs);
+    const voxelIndices = lod?.instanceIndicesByGuid.get(guid);
+    if (voxelIndices) {
+      color.setRGB(rgb[0], rgb[1], rgb[2]);
+      for (const instanceIndex of voxelIndices) lod.mesh.setColorAt(instanceIndex, color);
+      coloredAnyVoxel = true;
+      continue;
+    }
+    const elementGuids = _elementGuidsByStoreyGuid.get(guid);
+    if (elementGuids) {
+      for (const elementGuid of elementGuids) _setLiveColorForGuid(elementGuid, rgb);
+    }
+  }
+  if (coloredAnyVoxel && lod.mesh.instanceColor) lod.mesh.instanceColor.needsUpdate = true;
+}
+
 // "mesh" | "voxel" | "both"。複数LODは同じ体積を異なる粒度で表現したものなので、
 // voxel/bothモードでも常にactiveVoxelLodIndexの1つだけを可視にする。
 // 既定値はindex.html側の<input checked>から読み取る（ハードコードして二重管理
@@ -920,6 +1636,7 @@ function applyDisplayState() {
   if (glbRoot) {
     glbRoot.visible = displayMode === "mesh" || displayMode === "both";
   }
+  _updateSpaceVoxelVisibility();
   const showVoxels = displayMode === "voxel" || displayMode === "both";
   voxelLods.forEach((lod, index) => {
     lod.mesh.visible = showVoxels && index === activeVoxelLodIndex;
@@ -1491,6 +2208,7 @@ async function loadScene() {
 
   buildObjectsByGuid();
   buildNodesByGuid(sceneDescription.tree);
+  _buildStoreyDescendantIndex(sceneDescription.tree);
   renderTree(sceneDescription.tree);
 
   if (sceneDescription.assets.voxels) {
@@ -1510,6 +2228,30 @@ async function loadScene() {
       await loadSdfSlices(sceneDescription.assets.sdf);
     } catch (error) {
       console.warn("ifc2usd viewer: failed to load SDF slices, continuing without them", error);
+    }
+  }
+
+  if (sceneDescription.assets.twin) {
+    // twinもボクセル/sdf同様、無ければメッシュ表示自体には影響しない付加情報
+    // (serve --twin未指定時の「既存ビューワー機能が完全に無変化で動く」という
+    // E9のオフライン劣化要件)。
+    try {
+      await loadTwin(sceneDescription.assets.twin);
+    } catch (error) {
+      console.warn("ifc2usd viewer: failed to load twin.json, continuing without live mode", error);
+    }
+  }
+
+  if (sceneDescription.assets.spaceVoxels) {
+    // spaceVoxelsもtwin/voxels/sdf同様、無ければ既存機能に一切影響しない
+    // 付加的アセット（E9-5）。
+    try {
+      const response = await fetch(sceneDescription.assets.spaceVoxels);
+      if (!response.ok) throw new Error(`failed to load space voxels: ${response.status}`);
+      buildSpaceVoxelLods(await response.json());
+      applyDisplayState(); // 初期visibility(Liveがまだoffなら非表示)を確定する
+    } catch (error) {
+      console.warn("ifc2usd viewer: failed to load space voxels, continuing without them", error);
     }
   }
 
@@ -1549,6 +2291,24 @@ window.ifc2usdViewer = {
   setSectionClipHeight,
   hasSdfSlicesFor: (guid) => sdfSlicesByGuid.has(guid),
   getSdfSliceMesh: () => sdfSliceMesh,
+  getLiveTwinConfig: () => liveTwinConfig,
+  isLiveEnabled: () => liveEnabled,
+  getLiveOriginalColor: (guid) => {
+    let color = null;
+    forEachMeshOf(guid, (mesh) => {
+      if (color === null) color = mesh.userData.__liveOriginalColor ?? null;
+    });
+    return color;
+  },
+  getSpaceVoxelLods: () => spaceVoxelLods,
+  getSpaceVoxelInstanceColor: (spaceGuid) => {
+    const lod = _activeSpaceVoxelLod();
+    const indices = lod?.instanceIndicesByGuid.get(spaceGuid);
+    if (!indices || indices.length === 0 || !lod.mesh.instanceColor) return null;
+    const color = new THREE.Color();
+    lod.mesh.getColorAt(indices[0], color);
+    return [color.r, color.g, color.b];
+  },
   setGhostModeEnabled: (enabled) => {
     ghostModeEnabled = enabled;
     _applyGhostState();
