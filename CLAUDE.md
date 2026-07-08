@@ -112,7 +112,29 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   lookup) synced bidirectionally with the tree and a property panel, voxel rendering as one
   `InstancedMesh` per LOD, a mesh/voxel/both display-mode + LOD switch UI, and (when
   `scene.json`'s `assets.sdf` is present) a per-element SDF horizontal-slice overlay toggle +
-  height slider shown only while that element is selected.
+  height slider shown only while that element is selected. When `assets.twin` is present
+  (E9-4), a "Live" toolbar group (hidden entirely otherwise, same additive-asset convention as
+  SDF slices) lets the user pick a metric and toggle live polling of `/api/twin/values`; a
+  self-contained turbo-colormap polynomial approximation (`_turboColor`/`TURBO_LUT`, Anton
+  Mikhailov/Google Research, Apache-2.0 — no external asset/CDN) maps each bound element's
+  latest value to a color via the same `_ensureOwnMaterial` clone-on-write strategy E8-1 uses,
+  desaturating stale values per digital-twin-spec.md §5.2. The color-application math is
+  factored into `applyColorMappedValues`/`_valueToLiveColor`, which take an explicit `nowMs`
+  parameter rather than reading `Date.now()` internally, specifically so E9-6 (playback) can
+  call the same function with a historical frame's timestamp instead of duplicating the
+  min/max/LUT/staleness logic (digital-twin-spec.md §5.5 requires live and playback to share
+  one color-application function). The legend's gradient bar is a CSS `linear-gradient` on a
+  plain `<div>`, not a `<canvas>` — a `<canvas>` placed inside `#viewport` was tried first and
+  broke every existing Playwright pixel-sampling test, because `document.querySelector('#viewport
+  canvas')` (the pattern all of them use to grab the WebGL surface) matched that new canvas
+  first in DOM order instead of the renderer's own canvas (which `viewport.appendChild(renderer.domElement)`
+  only appends at JS runtime, i.e. later in document order). Any future overlay UI added inside
+  `#viewport` must avoid introducing a second `<canvas>` element there for the same reason.
+  `_setLiveColorForGuid`/`clearLiveColors` must not write to a mesh whose `.material` currently
+  *is* the shared `_ghostMaterial` singleton (E8-1) — doing so recolors every ghosted element in
+  the scene at once, not just the live-bound one; both functions check
+  `mesh.material === _ghostMaterial` and skip (matching `selectByGuid`'s own pre-existing
+  un-ghost-before-touching-color-or-emissive guard) rather than writing through it.
 
 ### ifcopenshell 0.8 specifics (breaking vs. the old notebook API)
 

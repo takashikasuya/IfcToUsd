@@ -20,6 +20,16 @@ const ghostToggle = document.getElementById("ghost-toggle");
 const treePanelToggle = document.getElementById("tree-panel-toggle");
 const propertyPanelToggle = document.getElementById("property-panel-toggle");
 const shortcutsOverlay = document.getElementById("shortcuts-overlay");
+const liveToolbarGroup = document.getElementById("live-toolbar-group");
+const liveToolbarDivider = document.getElementById("live-toolbar-divider");
+const liveMetricSelect = document.getElementById("live-metric-select");
+const liveToggle = document.getElementById("live-toggle");
+const livePauseToggle = document.getElementById("live-pause-toggle");
+const liveLegend = document.getElementById("live-legend");
+const liveLegendGradientEl = document.getElementById("live-legend-gradient");
+const liveLegendMinLabel = document.getElementById("live-legend-min");
+const liveLegendMaxLabel = document.getElementById("live-legend-max");
+const liveLegendUnitLabel = document.getElementById("live-legend-unit");
 
 // デザイントークン(E8-5 / ux-spec.md §3.5): 色はindex.htmlの:rootカスタム
 // プロパティを唯一の定義source とし、ここではgetComputedStyleで初期化時に
@@ -331,12 +341,12 @@ function renderPropertyPanel(guid) {
 
   propertyPanel.appendChild(dl);
 
-  // E9(ビルOS連携デジタルツイン)用: Live Dataセクションの挿入位置を確保する。
-  // 現時点では空のプレースホルダ(digital-twin-spec.md参照、このストーリーの
-  // スコープ外)。
+  // ビルOS連携デジタルツイン(Epic E9)のLive Dataセクション。twin.jsonが無い/
+  // このGUIDにバインディングが無い場合は_updateLiveDataSection内で空のままにする。
   const liveData = document.createElement("div");
   liveData.id = "property-live-data";
   propertyPanel.appendChild(liveData);
+  _updateLiveDataSection(guid);
 }
 
 let selectedGuid = null;
@@ -755,6 +765,343 @@ async function loadSdfSlices(sdfUrl) {
   sdfSlicesByGuid.clear();
   for (const [guid, entry] of Object.entries(data.elements)) {
     sdfSlicesByGuid.set(guid, entry);
+  }
+}
+
+// --- Live: ビルOS連携デジタルツイン表示 (E9-4, digital-twin-spec.md §5.1-§5.3) ---
+
+// turbo系カラーマップの多項式近似 (Anton Mikhailov / Google Research, 2019, Apache-2.0
+// "Turbo, An Improved Rainbow Colormap for Visualization"を移植)。外部ファイル・
+// CDN依存なしで256エントリのLUTを事前計算する（build_twin_json()のcolormap名
+// "turbo"に対応する唯一の実装、E9-4の受け入れ条件）。
+function _turboColor(x) {
+  x = Math.min(1, Math.max(0, x));
+  const x2 = x * x;
+  const x3 = x2 * x;
+  const x4 = x2 * x2;
+  const x5 = x3 * x2;
+  const r =
+    0.13572138 + 4.6153926 * x - 42.66032258 * x2 + 132.13108234 * x3 - 152.94239396 * x4 + 59.28637943 * x5;
+  const g =
+    0.09140261 + 2.19418839 * x + 4.84296658 * x2 - 14.18503333 * x3 + 4.27729857 * x4 + 2.82956604 * x5;
+  const b =
+    0.1066733 + 12.64194608 * x - 60.58204836 * x2 + 110.36276771 * x3 - 89.90310912 * x4 + 27.34824973 * x5;
+  return [Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b))];
+}
+
+const TURBO_LUT = Array.from({ length: 256 }, (_, i) => _turboColor(i / 255));
+
+// 凡例のグラデーションバーはCSS linear-gradientで描く（<canvas>にしない）。
+// <canvas>にすると、既存の全PlaywrightテストがWebGL描画結果の画素検証に使う
+// `document.querySelector('#viewport canvas')`（唯一のcanvas要素という前提）が、
+// レンダラーのcanvas(viewport.appendChild(renderer.domElement)でJS実行時に
+// 追加され、DOM順で常にこの凡例より後になる)より先にこちらへマッチしてしまい、
+// 3D描画ではなく凡例バーの画素を検証してしまう（実際に踏んだ回帰）。
+const TURBO_GRADIENT_CSS = (() => {
+  const stops = 16;
+  const parts = [];
+  for (let i = 0; i <= stops; i++) {
+    const t = i / stops;
+    const [r, g, b] = TURBO_LUT[Math.round(t * 255)];
+    parts.push(`rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}) ${Math.round(t * 100)}%`);
+  }
+  return `linear-gradient(to right, ${parts.join(", ")})`;
+})();
+
+// twin.json（build_twin_json()の出力）。scene.jsonにassets.twinが無ければnullの
+// まま（SDFスライスと同じ付加的アセット規約）。
+let liveTwinConfig = null;
+// guid -> [{pointId, metric, target}, ...]（liveTwinConfig.bindingsのtarget.guidで
+// 引けるように整理したもの。プロパティパネルのLive Dataセクション用）。
+const liveBindingsByGuid = new Map();
+let liveEnabled = false;
+let livePaused = false;
+let liveMetric = null;
+let livePollTimer = null;
+
+async function loadTwin(twinUrl) {
+  const response = await fetch(twinUrl);
+  if (!response.ok) {
+    throw new Error(`failed to load twin.json: ${response.status}`);
+  }
+  liveTwinConfig = await response.json();
+
+  liveBindingsByGuid.clear();
+  for (const binding of liveTwinConfig.bindings) {
+    const guid = binding.target && binding.target.guid;
+    if (!guid) continue; // spaceGuidバインディングはE9-5(空間ボクセルヒートマップ)のスコープ
+    if (!liveBindingsByGuid.has(guid)) liveBindingsByGuid.set(guid, []);
+    liveBindingsByGuid.get(guid).push(binding);
+  }
+
+  liveMetricSelect.innerHTML = "";
+  for (const metric of liveTwinConfig.metrics) {
+    const option = document.createElement("option");
+    option.value = metric.name;
+    option.textContent = metric.name;
+    liveMetricSelect.appendChild(option);
+  }
+  liveMetric = liveTwinConfig.metrics.length > 0 ? liveTwinConfig.metrics[0].name : null;
+  if (liveMetric) liveMetricSelect.value = liveMetric;
+
+  liveToolbarGroup.style.display = "";
+  liveToolbarDivider.style.display = "";
+}
+
+function _metricDefinition(name) {
+  return liveTwinConfig.metrics.find((m) => m.name === name);
+}
+
+// gltf.py/usd.pyのマテリアル重複排除（_ensureOwnMaterial参照）と同じ理由で、
+// 値の色を書き込む前にメッシュ専有のマテリアルを確保し、元の色は
+// mesh.userData.__liveOriginalColorへ一度だけ退避する（ゴースト/ホバー等の
+// 既存パターンと同じuserData退避方式）。
+//
+// ゴースト中のメッシュは`mesh.material`が全要素で共有される単一の
+// `_ghostMaterial`を指す（_setMeshGhosted参照）。ここでガードせずに
+// `.color`を書き換えると、ゴースト中の全要素の色がこの1要素の値色で
+// 汚染されてしまう（selectByGuidがhighlightMesh適用前に
+// `_setMeshGhosted(mesh, false)`で選択要素自身のゴーストを解除している
+// のと同じ種類の罠）。ゴースト中は単に何もしない——ゴースト解除後の
+// 次回ポーリングで正しく着色される。
+function _setLiveColorForGuid(guid, rgb) {
+  forEachMeshOf(guid, (mesh) => {
+    if (mesh.material === _ghostMaterial) return;
+    _ensureOwnMaterial(mesh);
+    if (mesh.userData.__liveOriginalColor === undefined) {
+      mesh.userData.__liveOriginalColor = mesh.material.color.clone();
+    }
+    mesh.material.color.setRGB(rgb[0], rgb[1], rgb[2]);
+  });
+}
+
+function clearLiveColors() {
+  for (const guid of liveBindingsByGuid.keys()) {
+    forEachMeshOf(guid, (mesh) => {
+      if (mesh.material === _ghostMaterial) return;
+      if (mesh.userData.__liveOriginalColor !== undefined) {
+        mesh.material.color.copy(mesh.userData.__liveOriginalColor);
+      }
+    });
+  }
+}
+
+function _formatLiveNumber(n) {
+  return Number.isFinite(n) ? n.toFixed(1) : String(n);
+}
+
+function updateLiveLegend(metricDef, min, max) {
+  liveLegendGradientEl.style.background = TURBO_GRADIENT_CSS;
+  liveLegendMinLabel.textContent = _formatLiveNumber(min);
+  liveLegendMaxLabel.textContent = _formatLiveNumber(max);
+  liveLegendUnitLabel.textContent = (metricDef && metricDef.unit) || "";
+  // index.htmlの`#live-legend`はCSSルール側で`display: none`を持つ（インライン
+  // styleではない）ため、`.style.display = ""`はそれを覆せない
+  // （liveToolbarGroup/liveToolbarDividerはインラインstyleでdisplay:noneを
+  // 持つため空文字列に戻すだけでよいが、こちらは明示的な値が必要）。
+  liveLegend.style.display = "block";
+}
+
+// digital-twin-spec.md §5.2: 「動いているように見えて実は止まっている」事故を
+// 防ぐため、datetimeがポーリング間隔×3(既定のstaleThresholdSeconds)より古い値は
+// 彩度を落とした灰色寄りに描画する。
+function _desaturateIfStale(rgb, datetime, nowMs, staleThresholdMs) {
+  const isStale = nowMs - Date.parse(datetime) > staleThresholdMs;
+  if (!isStale) return rgb;
+  const gray = (rgb[0] + rgb[1] + rgb[2]) / 3;
+  const amount = 0.7;
+  return rgb.map((c) => c + (gray - c) * amount);
+}
+
+function _valueToLiveColor(value, min, max, datetime, nowMs, staleThresholdMs) {
+  const t = (value - min) / (max - min);
+  const lutIndex = Math.round(Math.min(1, Math.max(0, t)) * 255);
+  return _desaturateIfStale(TURBO_LUT[lutIndex], datetime, nowMs, staleThresholdMs);
+}
+
+// 値の束を色へ変換して要素へ適用する共通処理。digital-twin-spec.md §5.5
+// 「色適用関数はE9-4と共通化し、ライブ/再生で表示経路を分岐させない」に対応する
+// 唯一の実装——E9-6(時系列再生)はポーリングではなくここへ履歴フレームの値と
+// その時点の`nowMs`(再生ヘッドの時刻。実時刻ではない)を渡して呼ぶだけになる
+// ように、fetch/setIntervalなどポーリング固有の処理は一切含めない。
+function applyColorMappedValues(metric, values, minOverride, maxOverride, nowMs) {
+  const metricDef = _metricDefinition(metric);
+  let min = minOverride;
+  let max = maxOverride;
+  if (min === undefined || min === null || max === undefined || max === null) {
+    // digital-twin-spec.md §5.2: min/max未指定なら受信値のP5〜P95で自動決定する。
+    // NaN/Infinityは`typeof`ではnumberだが順序比較が意味を持たないため、
+    // Number.isFinite()で明示的に除外する(バックエンド由来の異常値で
+    // min/maxそのものがNaNになりLUT参照が壊れるのを防ぐ)。
+    const nums = values
+      .map((v) => v.value)
+      .filter((v) => typeof v === "number" && Number.isFinite(v))
+      .sort((a, b) => a - b);
+    const percentile = (q) => nums[Math.min(nums.length - 1, Math.floor(q * (nums.length - 1)))];
+    min = nums.length > 0 ? percentile(0.05) : 0;
+    max = nums.length > 0 ? percentile(0.95) : 1;
+  }
+  if (max === min) max = min + 1; // ゼロ除算回避（全点が同一値の場合）
+
+  const staleThresholdMs = (liveTwinConfig.staleThresholdSeconds ?? 30) * 1000;
+
+  for (const entry of values) {
+    if (!entry.guid) continue; // spaceGuidの集計表示はE9-5のスコープ
+    const rgb = _valueToLiveColor(entry.value, min, max, entry.datetime, nowMs, staleThresholdMs);
+    _setLiveColorForGuid(entry.guid, rgb);
+  }
+
+  updateLiveLegend(metricDef, min, max);
+}
+
+function applyLiveValues(body) {
+  const metricDef = _metricDefinition(body.metric);
+  applyColorMappedValues(
+    body.metric,
+    body.values,
+    metricDef && metricDef.min,
+    metricDef && metricDef.max,
+    Date.now(),
+  );
+}
+
+const _LIVE_TOGGLE_DEFAULT_TITLE = liveToggle.title;
+
+async function refreshLiveValues() {
+  if (!liveMetric) return;
+  try {
+    const response = await fetch(`./api/twin/values?metric=${encodeURIComponent(liveMetric)}`);
+    if (!response.ok) throw new Error(`failed to fetch live values: ${response.status}`);
+    applyLiveValues(await response.json());
+    liveToggle.title = _LIVE_TOGGLE_DEFAULT_TITLE;
+  } catch (error) {
+    // ポーリングが繰り返し失敗しても、チェックボックス自体はON表示のまま
+    // (盤面は最後に成功した値のまま静止する)なので、consoleを見ない限り
+    // 気付けない「動いているように見えて実は止まっている」状態になりうる
+    // (digital-twin-spec.md §5.2と同種の事故)。せめてtitleで手掛かりを残す。
+    console.warn("ifc2usd viewer: failed to refresh live values", error);
+    liveToggle.title = `${_LIVE_TOGGLE_DEFAULT_TITLE} (last refresh failed — see console)`;
+  }
+}
+
+function stopLivePolling() {
+  if (livePollTimer !== null) {
+    clearInterval(livePollTimer);
+    livePollTimer = null;
+  }
+}
+
+function startLivePolling() {
+  refreshLiveValues();
+  const intervalMs = (liveTwinConfig.pollIntervalSeconds || 10) * 1000;
+  livePollTimer = setInterval(() => {
+    if (!livePaused) refreshLiveValues();
+  }, intervalMs);
+}
+
+liveMetricSelect.addEventListener("change", () => {
+  liveMetric = liveMetricSelect.value;
+  if (liveEnabled) refreshLiveValues();
+});
+
+liveToggle.addEventListener("change", () => {
+  liveEnabled = liveToggle.checked;
+  livePauseToggle.disabled = !liveEnabled;
+  if (liveEnabled) {
+    startLivePolling();
+  } else {
+    stopLivePolling();
+    clearLiveColors();
+    liveLegend.style.display = "none";
+  }
+});
+
+livePauseToggle.addEventListener("change", () => {
+  livePaused = livePauseToggle.checked;
+  if (!livePaused && liveEnabled) refreshLiveValues();
+});
+
+function _drawSparkline(canvas, history) {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (history.length < 2) return;
+
+  const values = history.map((h) => h.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  ctx.strokeStyle = _cssVar("--accent", "#3355ff");
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  history.forEach((point, i) => {
+    const x = (i / (history.length - 1)) * canvas.width;
+    const y = canvas.height - ((point.value - min) / range) * canvas.height;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function _populateLiveDataRow(pointId, valueEl, canvas) {
+  try {
+    const end = new Date();
+    const start = new Date(end.getTime() - 60 * 60 * 1000); // 直近1時間
+    const url =
+      `./api/twin/history?pointId=${encodeURIComponent(pointId)}` +
+      `&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}` +
+      "&granularity=None";
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`failed to fetch history: ${response.status}`);
+    const history = await response.json();
+    _drawSparkline(canvas, history);
+    const last = history[history.length - 1];
+    valueEl.textContent = last ? `${last.value} @ ${last.datetime}` : "no data";
+  } catch (error) {
+    console.warn("ifc2usd viewer: failed to load live data history", error);
+    valueEl.textContent = "unavailable";
+  }
+}
+
+// #property-live-data（renderPropertyPanelがプレースホルダとして確保する
+// 空div、E8-4由来）の中身をこのGUIDに紐づくポイントで埋める。twin.jsonが
+// 無い/このGUIDに紐づくポイントが無い場合は空のままにする。
+function _updateLiveDataSection(guid) {
+  const container = document.getElementById("property-live-data");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!liveTwinConfig) return;
+
+  const bindings = liveBindingsByGuid.get(guid) || [];
+  if (bindings.length === 0) return;
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Live Data";
+  container.appendChild(heading);
+
+  for (const binding of bindings) {
+    const row = document.createElement("div");
+    row.className = "property-live-data-row";
+
+    const metricDef = _metricDefinition(binding.metric);
+    const label = document.createElement("div");
+    label.className = "property-live-data-label";
+    label.textContent = metricDef ? `${binding.metric} (${metricDef.unit})` : binding.metric;
+    row.appendChild(label);
+
+    const valueEl = document.createElement("div");
+    valueEl.className = "property-live-data-value";
+    valueEl.textContent = "…";
+    row.appendChild(valueEl);
+
+    const canvas = document.createElement("canvas");
+    canvas.className = "property-live-data-sparkline";
+    canvas.width = 260;
+    canvas.height = 40;
+    row.appendChild(canvas);
+
+    container.appendChild(row);
+    _populateLiveDataRow(binding.pointId, valueEl, canvas);
   }
 }
 
@@ -1513,6 +1860,17 @@ async function loadScene() {
     }
   }
 
+  if (sceneDescription.assets.twin) {
+    // twinもボクセル/sdf同様、無ければメッシュ表示自体には影響しない付加情報
+    // (serve --twin未指定時の「既存ビューワー機能が完全に無変化で動く」という
+    // E9のオフライン劣化要件)。
+    try {
+      await loadTwin(sceneDescription.assets.twin);
+    } catch (error) {
+      console.warn("ifc2usd viewer: failed to load twin.json, continuing without live mode", error);
+    }
+  }
+
   return sceneDescription;
 }
 
@@ -1549,6 +1907,15 @@ window.ifc2usdViewer = {
   setSectionClipHeight,
   hasSdfSlicesFor: (guid) => sdfSlicesByGuid.has(guid),
   getSdfSliceMesh: () => sdfSliceMesh,
+  getLiveTwinConfig: () => liveTwinConfig,
+  isLiveEnabled: () => liveEnabled,
+  getLiveOriginalColor: (guid) => {
+    let color = null;
+    forEachMeshOf(guid, (mesh) => {
+      if (color === null) color = mesh.userData.__liveOriginalColor ?? null;
+    });
+    return color;
+  },
   setGhostModeEnabled: (enabled) => {
     ghostModeEnabled = enabled;
     _applyGhostState();

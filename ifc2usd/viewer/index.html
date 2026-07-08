@@ -123,6 +123,34 @@
       #shortcuts-overlay dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-2); }
       #shortcuts-overlay dt { font-family: monospace; background: var(--bg-control); border-radius: var(--radius); padding: 0 var(--space-1); }
       #shortcuts-overlay dd { margin: 0; }
+
+      /* Live: ビルOS連携デジタルツイン表示 (E9-4)。scene.jsonにassets.twinが
+         無ければ`display:none`のまま(JSが読み込み後に外す、SDFスライスと同じ
+         付加的アセット規約)。 */
+      #live-legend {
+        position: absolute; bottom: var(--space-2); right: var(--space-2); z-index: 5;
+        background: rgba(32, 32, 32, 0.85); border: 1px solid var(--border); border-radius: 4px;
+        padding: 6px var(--space-2); font-size: 11px; color: var(--text-dim);
+        display: none;
+      }
+      /* canvasではなくCSS linear-gradientで描く: viewer.js初期化時に
+         `viewport.appendChild(renderer.domElement)`でWebGL用canvasが追加される
+         より前にこの要素が(静的HTMLとして)#viewport配下に存在するため、もし
+         <canvas>要素にしてしまうと既存の全Playwrightテストが使う
+         `#viewport canvas`という単一canvas前提のセレクタが、シーン描画用
+         canvasではなくこちらを拾ってしまう(実際に踏んだ回帰)。 */
+      #live-legend-gradient { display: block; width: 120px; height: 10px; border-radius: 2px; }
+      #live-legend-labels { display: flex; justify-content: space-between; margin-top: 2px; }
+      #live-legend-unit { color: var(--text); }
+
+      #property-live-data h3 {
+        font-size: 11px; text-transform: uppercase; color: var(--text-dim);
+        margin: var(--space-3) 0 var(--space-1) 0;
+      }
+      .property-live-data-row { margin-bottom: var(--space-2); font-size: 12px; }
+      .property-live-data-label { color: var(--text-dim); text-transform: uppercase; font-size: 10px; }
+      .property-live-data-value { margin: 2px 0; }
+      .property-live-data-sparkline { display: block; width: 100%; height: 40px; background: var(--bg-control); border-radius: var(--radius); }
     </style>
     <script type="importmap">
       {
@@ -166,6 +194,21 @@
               <input type="checkbox" id="sdf-slice-toggle" disabled /> SDF slice
             </label>
             <input type="range" id="sdf-slice-height-slider" aria-label="SDF slice height" title="SDF slice height" disabled />
+          </div>
+          <div class="toolbar-divider" id="live-toolbar-divider" style="display: none"></div>
+          <div class="toolbar-group" id="live-toolbar-group" title="Live: building-OS metric color overlay" style="display: none">
+            <span class="toolbar-group-label">Live</span>
+            <select id="live-metric-select" aria-label="Live metric" title="Metric to color-map onto elements"></select>
+            <label title="Enable/disable the live color overlay"><input type="checkbox" id="live-toggle" /> Live</label>
+            <label title="Pause polling without clearing the current colors"><input type="checkbox" id="live-pause-toggle" disabled /> Pause</label>
+          </div>
+        </div>
+        <div id="live-legend">
+          <div id="live-legend-gradient"></div>
+          <div id="live-legend-labels">
+            <span id="live-legend-min"></span>
+            <span id="live-legend-unit"></span>
+            <span id="live-legend-max"></span>
           </div>
         </div>
         <div id="shortcuts-overlay">
