@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IFC2USD — システム解説</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f6f8fa;
+    --text: #1f2328;
+    --text-dim: #59636e;
+    --border: #d1d9e0;
+    --accent: #0969da;
+    --accent-soft: #ddf4ff;
+    --code-bg: #f6f8fa;
+    --warn-bg: #fff8c5;
+    --ok: #1a7f37;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --bg-soft: #161b22;
+      --text: #e6edf3;
+      --text-dim: #9198a1;
+      --border: #30363d;
+      --accent: #4493f8;
+      --accent-soft: #121d2f;
+      --code-bg: #161b22;
+      --warn-bg: #3a3000;
+      --ok: #3fb950;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", Meiryo, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
+  header.hero {
+    border-bottom: 1px solid var(--border);
+    padding: 2.5rem 0 2rem;
+    margin-bottom: 2rem;
+  }
+  header.hero h1 { margin: 0 0 .5rem; font-size: 2rem; letter-spacing: .02em; }
+  header.hero p.lead { margin: 0; color: var(--text-dim); font-size: 1.05rem; max-width: 46em; }
+  .pill-row { margin-top: 1rem; display: flex; flex-wrap: wrap; gap: .5rem; }
+  .pill {
+    font-size: .78rem; padding: .15rem .65rem; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-dim); background: var(--bg-soft);
+  }
+  nav.toc {
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+    padding: .9rem 1.2rem; margin-bottom: 2.5rem; font-size: .92rem;
+  }
+  nav.toc strong { display: block; margin-bottom: .3rem; }
+  nav.toc a { margin-right: 1.1em; color: var(--accent); text-decoration: none; white-space: nowrap; }
+  nav.toc a:hover { text-decoration: underline; }
+  h2 {
+    font-size: 1.45rem; margin: 3rem 0 1rem;
+    padding-bottom: .35rem; border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 1.1rem; margin: 2rem 0 .6rem; }
+  a { color: var(--accent); }
+  p { margin: .6rem 0 1rem; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .88em; background: var(--code-bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: .08em .35em;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: .9rem 1.1rem; overflow-x: auto; line-height: 1.55;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: .85rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0 1.5rem; font-size: .92rem; }
+  th, td { border: 1px solid var(--border); padding: .5rem .75rem; text-align: left; vertical-align: top; }
+  th { background: var(--bg-soft); }
+  .scroll-x { overflow-x: auto; }
+  .card-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem; margin: 1.2rem 0;
+  }
+  .card {
+    border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.1rem;
+    background: var(--bg-soft);
+  }
+  .card h4 { margin: 0 0 .4rem; font-size: .98rem; }
+  .card p { margin: 0; font-size: .88rem; color: var(--text-dim); }
+  .callout {
+    border-left: 4px solid var(--accent); background: var(--accent-soft);
+    border-radius: 0 8px 8px 0; padding: .8rem 1.1rem; margin: 1.2rem 0; font-size: .93rem;
+  }
+  /* アーキテクチャ図 */
+  figure.diagram { margin: 1.5rem 0; }
+  figure.diagram .scroll-x { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); padding: 1rem; }
+  figure.diagram svg { display: block; min-width: 760px; width: 100%; height: auto; }
+  figure.diagram figcaption { font-size: .85rem; color: var(--text-dim); margin-top: .5rem; }
+  .diag-box { fill: var(--bg); stroke: var(--border); }
+  .diag-box-accent { fill: var(--accent-soft); stroke: var(--accent); }
+  .diag-label { fill: var(--text); font-size: 13px; font-family: inherit; }
+  .diag-sub { fill: var(--text-dim); font-size: 11px; font-family: inherit; }
+  .diag-edge { stroke: var(--text-dim); fill: none; marker-end: url(#arrow); }
+  .diag-edge-dash { stroke-dasharray: 5 4; }
+  footer {
+    margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--border);
+    font-size: .85rem; color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>IFC2USD</h1>
+  <p class="lead">
+    IFC（建築BIM）モデルを構造化された OpenUSD ステージへ変換し、ボクセル解析・glTFエクスポート・
+    自己完結型Webビューワー・ビルOS連携のデジタルツイン表示までを、ひとつのCLIで提供するツールキット。
+  </p>
+  <div class="pill-row">
+    <span class="pill">Python ≥ 3.10</span>
+    <span class="pill">OpenUSD (usd-core)</span>
+    <span class="pill">ifcopenshell 0.8</span>
+    <span class="pill">three.js（同梱・CDN不要）</span>
+    <span class="pill">uvのみでセットアップ完結</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <strong>目次</strong>
+  <a href="#overview">概要</a>
+  <a href="#architecture">アーキテクチャ</a>
+  <a href="#features">機能</a>
+  <a href="#usage">使い方</a>
+  <a href="#twin">デジタルツイン表示</a>
+  <a href="#tech">利用技術</a>
+  <a href="#testing">テストと品質</a>
+</nav>
+
+<h2 id="overview">概要</h2>
+<p>
+  IFC2USD は、建築BIMの標準交換フォーマットである <strong>IFC</strong> のモデルを、
+  ピクサー発のシーン記述フォーマット <strong>OpenUSD</strong> の構造化ステージへ変換する。
+  IFCの空間階層（Site → Building → Storey → Space / Element → Object）を USD の Xform 階層として
+  そのまま再現し、各エレメントにメッシュ・<code>UsdPreviewSurface</code> マテリアル・IFC由来のメタデータ
+  （GUID・IFCクラス・名称・緯度経度など）を <code>customData</code> として付与する。
+</p>
+<p>本システムの役割は大きく2つに分かれる。</p>
+<div class="card-grid">
+  <div class="card">
+    <h4>1. IFC→USD変換（正本の生成）</h4>
+    <p>IFCの階層・ジオメトリ・マテリアル・メタデータを忠実にUSDへ変換する。
+    この変換結果が以降のすべての処理の唯一の正本（single source of truth）となり、
+    後段の処理が書き換えることはない。</p>
+  </div>
+  <div class="card">
+    <h4>2. 変換結果の統合閲覧</h4>
+    <p>正本USDからボクセル・SDF（符号付き距離場）・glTF・シーンインデックスなどの
+    派生アセットを生成し、USDネイティブビューワーとブラウザの2系統の閲覧経路を提供する。
+    さらにビルOSと連携すれば、実センサー値のデジタルツイン表示までできる。</p>
+  </div>
+</div>
+<div class="callout">
+  <strong>設計思想:</strong> 閲覧手段を1つの独自ビューワーに寄せるのではなく、
+  Hydra（USDのレンダリング抽象化層）の考え方に倣って「シーンデータの用意」と「実際のレンダリング」を分離している。
+  USDを直接読める既存ツール（usdview / Blender / Omniverse）には独自レンダラを書かずにデータ側で対応し、
+  ブラウザにはUSDをパースさせず軽量な派生ファイルだけを配る。
+</div>
+
+<h2 id="architecture">アーキテクチャ</h2>
+
+<figure class="diagram">
+  <div class="scroll-x">
+  <svg viewBox="0 0 860 470" role="img" aria-label="IFC2USDのデータフロー図">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" opacity="0.65"/>
+      </marker>
+    </defs>
+
+    <!-- 入力 -->
+    <rect class="diag-box" x="20" y="120" width="110" height="52" rx="8"/>
+    <text class="diag-label" x="75" y="142" text-anchor="middle">IFCモデル</text>
+    <text class="diag-sub" x="75" y="160" text-anchor="middle">.ifc</text>
+
+    <!-- 正本USD -->
+    <rect class="diag-box-accent" x="220" y="112" width="150" height="68" rx="8"/>
+    <text class="diag-label" x="295" y="140" text-anchor="middle">structured USD</text>
+    <text class="diag-sub" x="295" y="158" text-anchor="middle">正本（書き換え不可）</text>
+
+    <!-- convert edge -->
+    <path class="diag-edge" d="M 130 146 L 214 146" stroke-width="1.5"/>
+    <text class="diag-sub" x="172" y="138" text-anchor="middle">convert</text>
+
+    <!-- 派生: GLB -->
+    <rect class="diag-box" x="470" y="20" width="140" height="46" rx="8"/>
+    <text class="diag-label" x="540" y="48" text-anchor="middle">GLB (glTF)</text>
+    <path class="diag-edge" d="M 370 122 C 420 90, 430 60, 464 46" stroke-width="1.5"/>
+    <text class="diag-sub" x="418" y="72" text-anchor="middle">export-gltf</text>
+
+    <!-- 派生: voxels -->
+    <rect class="diag-box" x="470" y="90" width="140" height="60" rx="8"/>
+    <text class="diag-label" x="540" y="113" text-anchor="middle">ボクセル</text>
+    <text class="diag-sub" x="540" y="131" text-anchor="middle">voxels.json v3 /</text>
+    <text class="diag-sub" x="540" y="144" text-anchor="middle">PointInstancer USD</text>
+    <path class="diag-edge" d="M 370 132 L 464 120" stroke-width="1.5"/>
+    <text class="diag-sub" x="418" y="116" text-anchor="middle">voxelize</text>
+
+    <!-- 派生: serve assets -->
+    <rect class="diag-box" x="470" y="170" width="140" height="78" rx="8"/>
+    <text class="diag-label" x="540" y="192" text-anchor="middle">静的アセット一式</text>
+    <text class="diag-sub" x="540" y="210" text-anchor="middle">GLB + scene.json + voxels</text>
+    <text class="diag-sub" x="540" y="224" text-anchor="middle">(+ sdf / twin /</text>
+    <text class="diag-sub" x="540" y="237" text-anchor="middle">space_voxels)</text>
+    <path class="diag-edge" d="M 370 160 L 464 200" stroke-width="1.5"/>
+    <text class="diag-sub" x="418" y="192" text-anchor="middle">serve</text>
+
+    <!-- space-voxelize -->
+    <rect class="diag-box" x="220" y="270" width="150" height="60" rx="8"/>
+    <text class="diag-label" x="295" y="293" text-anchor="middle">space_voxels.json</text>
+    <text class="diag-sub" x="295" y="311" text-anchor="middle">IfcSpace→ボクセル帰属</text>
+    <path class="diag-edge" d="M 75 172 C 75 260, 140 296, 214 298" stroke-width="1.5"/>
+    <text class="diag-sub" x="118" y="268" text-anchor="middle">space-voxelize</text>
+    <path class="diag-edge" d="M 370 288 C 420 280, 440 260, 466 240" stroke-width="1.5"/>
+
+    <!-- Web viewer -->
+    <rect class="diag-box-accent" x="700" y="170" width="140" height="78" rx="8"/>
+    <text class="diag-label" x="770" y="198" text-anchor="middle">Webビューワー</text>
+    <text class="diag-sub" x="770" y="216" text-anchor="middle">three.js（同梱）</text>
+    <text class="diag-sub" x="770" y="230" text-anchor="middle">ブラウザ・経路B</text>
+    <path class="diag-edge" d="M 610 209 L 694 209" stroke-width="1.5"/>
+
+    <!-- Building OS -->
+    <rect class="diag-box" x="700" y="330" width="140" height="64" rx="8"/>
+    <text class="diag-label" x="770" y="355" text-anchor="middle">GUTPビルOS</text>
+    <text class="diag-sub" x="770" y="373" text-anchor="middle">REST API（センサー値）</text>
+    <path class="diag-edge" d="M 770 324 L 770 254" stroke-width="1.5"/>
+    <text class="diag-sub" x="762" y="295" text-anchor="end">/api/twin/*</text>
+    <text class="diag-sub" x="762" y="309" text-anchor="end">同一オリジンプロキシ</text>
+
+    <!-- Native viewers -->
+    <rect class="diag-box" x="470" y="380" width="140" height="64" rx="8"/>
+    <text class="diag-label" x="540" y="403" text-anchor="middle">usdview / Blender /</text>
+    <text class="diag-label" x="540" y="420" text-anchor="middle">Omniverse</text>
+    <text class="diag-sub" x="540" y="436" text-anchor="middle">USDネイティブ・経路A</text>
+    <path class="diag-edge diag-edge-dash" d="M 295 180 C 295 380, 380 408, 464 410" stroke-width="1.5"/>
+    <text class="diag-sub" x="330" y="380" text-anchor="middle">そのまま開ける</text>
+  </svg>
+  </div>
+  <figcaption>
+    データフロー全体像。実線はCLIコマンドによる生成・配信、破線はUSDネイティブツールでの直接閲覧。
+  </figcaption>
+</figure>
+
+<h3>設計上の不変条件</h3>
+<table>
+  <tr><th>不変条件</th><th>内容</th></tr>
+  <tr>
+    <td>正本は1つ</td>
+    <td><code>convert</code> が生成するUSDが唯一の正本。<code>voxelize</code> /
+      <code>export-gltf</code> / <code>serve</code> は読むだけで書き換えない。
+      PointInstancerボクセルレイヤーも既存USDへの「参照」を持つ独立ファイル。</td>
+  </tr>
+  <tr>
+    <td>派生アセットは付加的</td>
+    <td>voxels.json / sdf.json / twin.json / space_voxels.json はどれも「あれば機能が増え、
+      無ければ既存動作を一切変えない」。存在は <code>scene.json</code> の <code>assets.*</code> キーで伝える。</td>
+  </tr>
+  <tr>
+    <td>ブラウザはUSDを読まない</td>
+    <td>WebビューワーはGLB・scene.json ほか軽量な派生ファイルだけを読む。
+      USDのパースはすべてPython側で完結する。</td>
+  </tr>
+  <tr>
+    <td>認証情報はサーバー側のみ</td>
+    <td>ビルOSのURL・認証情報は <code>twin-config.json</code>（サーバー側）にのみ存在。
+      ブラウザは同一オリジンのホワイトリスト済みプロキシ
+      （<code>/api/twin/values</code>・<code>/api/twin/history</code>）越しにしか上流へ到達できず、
+      エラー応答にも上流URLは含まれない。</td>
+  </tr>
+</table>
+
+<h3>モジュール構成</h3>
+<div class="scroll-x">
+<table>
+  <tr><th>モジュール</th><th>役割</th></tr>
+  <tr><td><code>cli.py</code></td><td>argparseベースのCLI。<code>convert</code> / <code>voxelize</code> / <code>export-gltf</code> / <code>serve</code> / <code>space-voxelize</code> の5サブコマンド</td></tr>
+  <tr><td><code>ifc.py</code></td><td>ifcopenshellによるジオメトリ・プロパティ抽出。IfcSpace専用の抽出経路も持つ</td></tr>
+  <tr><td><code>usd.py</code></td><td>USDステージ構築（Xform階層・メッシュ・マテリアル・customData）と、変換済みUSDからの要素読み出し</td></tr>
+  <tr><td><code>voxel.py</code></td><td>表面/内部充填ボクセル化、Morton(Z-order)符号化、delta+RLE圧縮、JSON/PointInstancerレイヤー出力</td></tr>
+  <tr><td><code>sdf.py</code> / <code>sdf_slice.py</code></td><td>narrow-band SDF（符号付き距離場）の構築と、ビューワー用水平断面グリッド化</td></tr>
+  <tr><td><code>gltf.py</code></td><td>trimesh経由のUSD→GLBエクスポート。ノード<code>extras</code>へGUID/class/nameを書き出す</td></tr>
+  <tr><td><code>scene_index.py</code></td><td>USD→<code>scene.json</code>（ビューワーが読む階層+メタデータの平坦化）</td></tr>
+  <tr><td><code>serve.py</code></td><td>静的アセットの組み立てとローカルHTTPサーバー（127.0.0.1のみ）、twinプロキシの組み込み</td></tr>
+  <tr><td><code>twin.py</code> / <code>mapping.py</code> / <code>twin_proxy.py</code></td><td>ビルOS RESTアダプタ、GUID↔ポイントのmapping.json（3生成経路）、TTLキャッシュ付き同一オリジンプロキシ</td></tr>
+  <tr><td><code>space_heatmap.py</code></td><td>IfcSpaceのボクセル帰属マップと空間/Storey単位の値集計</td></tr>
+  <tr><td><code>viewer/</code></td><td>three.js Webビューワー本体（ESモジュール、ビルド不要、three.js同梱）</td></tr>
+</table>
+</div>
+
+<h2 id="features">機能</h2>
+<div class="card-grid">
+  <div class="card">
+    <h4>IFC→USD変換</h4>
+    <p>空間階層をXformツリーで忠実に再現。要素ごとにメッシュ+UsdPreviewSurfaceマテリアル+
+    GUID/クラス/名称/緯度経度のcustomData。Z-UP既定、<code>--y-up</code>切替。</p>
+  </div>
+  <div class="card">
+    <h4>ボクセル化（LOD付き）</h4>
+    <p>表面ボクセルまたはflood-fillによる内部充填。複数<code>--size</code>でLOD化し、
+    JSON（Morton符号化+delta+RLE圧縮）とPointInstancer USDレイヤーの2形式で出力。</p>
+  </div>
+  <div class="card">
+    <h4>glTF(GLB)エクスポート</h4>
+    <p>Webビューワーの内部形式であり単体でも利用可能。metallic/roughnessを正しく引き継ぎ、
+    IFC要素との対応をノードextrasに保持。</p>
+  </div>
+  <div class="card">
+    <h4>自己完結Webビューワー</h4>
+    <p>階層ツリー・検索・アイソレート、クリック選択+プロパティパネル、メッシュ/ボクセル表示切替、
+    LOD切替、断面クリップ、ホバー/アウトラインハイライト。オフライン環境でも動作。</p>
+  </div>
+  <div class="card">
+    <h4>SDF断面オーバーレイ</h4>
+    <p>選択要素のnarrow-band SDF水平断面を半透明表示（白=表面、青=内部、橙=外部）。
+    余分な計算コストがあるためopt-in（<code>--sdf-slices</code>）。</p>
+  </div>
+  <div class="card">
+    <h4>デジタルツイン表示</h4>
+    <p>Live色マッピング（turboカラーマップ+stale値の彩度低下）、部屋単位ボクセルヒートマップ、
+    時系列再生（Playback）。ビルOSのセンサー値を3Dモデル上へ可視化。</p>
+  </div>
+</div>
+
+<h2 id="usage">使い方</h2>
+
+<h3>セットアップ</h3>
+<p>
+  <a href="https://docs.astral.sh/uv/">uv</a> だけで完結する。usd-core と ifcopenshell が
+  PyPI配布されているため、condaやUSDのソースビルドは不要。
+</p>
+<pre><code>uv sync          # .venv を自動作成し、dev グループ（pytest / Playwright）まで導入</code></pre>
+
+<h3>基本フロー</h3>
+<pre><code># 1. IFC→USD変換（既定で output/&lt;name&gt;_structured.usda）
+uv run ifc2usd convert files/ToyodaLab.ifc
+
+# 2. ブラウザで閲覧（http://127.0.0.1:8000 が開く）
+uv run ifc2usd serve output/ToyodaLab_structured.usda</code></pre>
+
+<h3>コマンド一覧</h3>
+<div class="scroll-x">
+<table>
+  <tr><th>コマンド</th><th>説明</th><th>主なオプション</th></tr>
+  <tr>
+    <td><code>convert &lt;ifc&gt;</code></td>
+    <td>IFC→USD変換（サブコマンド省略の <code>ifc2usd &lt;ifc&gt;</code> でも可）</td>
+    <td><code>-o</code> 出力先 / <code>--y-up</code> / <code>-v</code></td>
+  </tr>
+  <tr>
+    <td><code>voxelize &lt;usda|ifc&gt;</code></td>
+    <td>占有ボクセル化。JSON + PointInstancer USDレイヤーを出力</td>
+    <td><code>--size</code>（複数指定でLOD）/ <code>--fill</code> 内部充填 / <code>-o</code></td>
+  </tr>
+  <tr>
+    <td><code>export-gltf &lt;usda&gt;</code></td>
+    <td>USD→GLBエクスポート</td>
+    <td><code>-o</code> 出力先</td>
+  </tr>
+  <tr>
+    <td><code>serve &lt;usda&gt;</code></td>
+    <td>Webビューワー配信（127.0.0.1のみ）</td>
+    <td><code>--port</code> / <code>--no-open</code> / <code>--sdf-slices</code> /
+        <code>--twin</code> / <code>--space-voxels</code></td>
+  </tr>
+  <tr>
+    <td><code>space-voxelize &lt;ifc&gt;</code></td>
+    <td>IfcSpace（部屋）のボクセル帰属マップ生成（ヒートマップの前提データ）</td>
+    <td><code>--reference</code> 変換済みUSD（必須・原点合わせ）/ <code>--size</code> / <code>-o</code></td>
+  </tr>
+</table>
+</div>
+
+<h3>USDネイティブツールでの閲覧（経路A）</h3>
+<pre><code>uv run ifc2usd voxelize output/model.usda --size 1.0 --size 0.5
+# → 出力された PointInstancer .usda を usdview / Blender / Omniverse でそのまま開く
+#   voxelLOD variantSet で --size ごとのLODを切替できる</code></pre>
+
+<h2 id="twin">デジタルツイン表示モード</h2>
+<p>
+  GUTPビルOSのREST APIと連携し、温度・CO2などの実センサー値を3Dモデル上へ可視化する。
+  ビルOSのデータモデルはIFC GUIDを持たないため、<code>mapping.json</code> が
+  GUID↔計測ポイントの結合層になる（手動記述 / IFCプロパティからの自動生成 /
+  ビルOS customTags逆引きの3経路）。
+</p>
+<pre><code># 部屋単位ヒートマップ用の帰属マップを事前生成
+uv run ifc2usd space-voxelize files/ToyodaLab.ifc \
+    --reference output/ToyodaLab_structured.usda --size 0.5 -o output/spaces.json
+
+# デジタルツインモードで起動
+uv run ifc2usd serve output/ToyodaLab_structured.usda \
+    --twin twin-config.json --space-voxels output/spaces.json</code></pre>
+<table>
+  <tr><th>機能</th><th>内容</th></tr>
+  <tr>
+    <td>Live</td>
+    <td>メトリックを選ぶと <code>/api/twin/values</code> をポーリングし、バインド済み要素を
+      turboカラーマップで着色+凡例表示。ポーリング間隔×3より古い値は彩度を落とし、
+      「止まっているのに動いて見える」事故を防ぐ。選択要素のプロパティパネルには
+      最新値+スパークラインのLive Dataセクションが出る。</td>
+  </tr>
+  <tr>
+    <td>空間ヒートマップ</td>
+    <td>部屋（IfcSpace）単位の集計値（平均）でボクセルレイヤーを着色。
+      IfcSpaceジオメトリの無いモデルではStorey配下の要素メッシュ着色へフォールバック。</td>
+  </tr>
+  <tr>
+    <td>Playback（時系列再生）</td>
+    <td><code>/api/twin/history</code> を対象ポイントぶん一括取得してフレーム列へ整形し、
+      スライダー/自動再生でスクラブ。再生中の逐次fetchはしない。
+      色計算はLive・ヒートマップと完全に同一の関数を通る（表示経路を分岐させない）。</td>
+  </tr>
+  <tr>
+    <td>セキュリティ</td>
+    <td>ビルOSのURL・認証情報はサーバー側の設定ファイルにのみ存在。ブラウザへ配る
+      <code>twin.json</code> はメトリック定義とバインディングのみ。プロキシは
+      values/history の2エンドポイントだけをホワイトリストし、制御系APIへは一切到達できない。</td>
+  </tr>
+</table>
+
+<h2 id="tech">利用技術</h2>
+<div class="scroll-x">
+<table>
+  <tr><th>技術</th><th>用途</th></tr>
+  <tr><td><a href="https://openusd.org/">OpenUSD</a>（usd-core ≥ 25.5）</td>
+      <td>変換先のシーン記述。Xform階層・Mesh・UsdPreviewSurface・variantSet・customDataを使用</td></tr>
+  <tr><td><a href="https://ifcopenshell.org/">ifcopenshell</a> ≥ 0.8</td>
+      <td>IFCのパース・ジオメトリテッセレーション・プロパティ抽出（0.8の新API: 文字列キー設定、列優先行列など）</td></tr>
+  <tr><td>numpy</td><td>ボクセル化（AABB-グリッド重なり判定のベクトル化）・SDF距離計算・座標変換</td></tr>
+  <tr><td><a href="https://trimesh.org/">trimesh</a> / rtree</td><td>USD→glTF(GLB)エクスポートのシーングラフ構築、空間インデックス</td></tr>
+  <tr><td><a href="https://threejs.org/">three.js</a>（同梱）</td>
+      <td>Webビューワーの描画。InstancedMeshによるボクセル描画、Raycasterによるクリック選択。
+        CDN参照なしでオフライン動作</td></tr>
+  <tr><td>Python標準ライブラリ <code>http.server</code></td>
+      <td>ローカル配信+同一オリジンtwinプロキシ。外部Webフレームワーク非依存</td></tr>
+  <tr><td>pytest / <a href="https://playwright.dev/python/">Playwright</a></td>
+      <td>変換〜ビューワーまでのE2Eテスト。実ブラウザでレンダリング画素をサンプリングして検証</td></tr>
+  <tr><td>アルゴリズム</td>
+      <td>Morton(Z-order)符号化（63bit、自前実装）、delta+RLE圧縮、ボクセルグリッドflood-fillによる
+        内部判定、narrow-band SDF、turboカラーマップ多項式近似（Apache-2.0）</td></tr>
+</table>
+</div>
+
+<h2 id="testing">テストと品質</h2>
+<p>
+  小さな合成IFCフィクスチャ（Site/Building/Storeyに色付きの壁2枚）を実際に変換し、
+  座標系・階層・ジオメトリ・マテリアル・ボクセル化・glTF・ビューワー・デジタルツイン連携までを
+  検証するテストスイート（350+件）を同梱している。外部データ不要で動く。
+</p>
+<ul>
+  <li>Webビューワー関連はPlaywrightの実ブラウザE2E。データの正しさだけでなく、
+    <strong>実際にレンダリングされた画素の色をサンプリングして</strong>「画面に正しく届いているか」まで確認する
+    （glTFのmetallic/roughness欠落やボクセルが黒く塗り潰されるといった、データ検査では
+    捕まらない実バグをこの方式で検出してきた）</li>
+  <li>ビルOSはモックHTTPサーバーで代替し、ネットワーク接続なしでデジタルツイン機能をテストできる</li>
+</ul>
+<pre><code>uv run pytest                              # 全テストの実行
+uv run python tests/generate_fixture.py    # テスト用IFCフィクスチャの再生成</code></pre>
+
+<footer>
+  <p>
+    詳細ドキュメント:
+    <a href="viewer/README.md">ビューワー設計の背景</a> ・
+    <a href="viewer/spec.md">ボクセル/配信フォーマット仕様</a> ・
+    <a href="viewer/digital-twin-spec.md">デジタルツイン仕様</a> ・
+    <a href="viewer/architecture.md">アーキテクチャ調査</a>
+  </p>
+  <p>このページは self-contained なHTML（外部アセット参照なし）。リポジトリの <code>docs/overview.html</code> をブラウザで直接開ける。</p>
+</footer>
+
+</div>
+</body>
+</html>
