@@ -12,6 +12,7 @@ import http.server
 import json
 import logging
 import shutil
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -234,6 +235,17 @@ class _TwinProxyHandler(_NoDirectoryListingHandler):
         self.wfile.write(body)
 
 
+class _QuietDisconnectServer(http.server.ThreadingHTTPServer):
+    """クライアント切断（GLB のロード中断など）でトレースバックを吐かないサーバー。"""
+
+    def handle_error(self, request, client_address) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            logger.debug("client %s disconnected: %s", client_address, exc)
+            return
+        super().handle_error(request, client_address)
+
+
 def make_server(
     directory: Path,
     port: int = 8000,
@@ -252,4 +264,4 @@ def make_server(
         handler = functools.partial(_TwinProxyHandler, directory=str(directory), twin_proxy=twin_proxy)
     else:
         handler = functools.partial(_NoDirectoryListingHandler, directory=str(directory))
-    return http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    return _QuietDisconnectServer(("127.0.0.1", port), handler)

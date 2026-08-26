@@ -79,7 +79,7 @@ def test_get_space_geometry_yields_world_space_vertices(space_ifc_path):
     np.testing.assert_allclose(verts_arr.max(axis=0), [5.0, 5.0, 3.0], atol=1e-6)
 
 
-def test_get_space_geometry_applies_y_up_swap(space_ifc_path):
+def test_get_space_geometry_applies_y_up_rotation(space_ifc_path):
     path, _ = space_ifc_path
     ifc_file = ifcopenshell.open(str(path))
     settings = create_settings()
@@ -87,9 +87,10 @@ def test_get_space_geometry_applies_y_up_swap(space_ifc_path):
     [(_, _, verts, _)] = list(get_space_geometry(settings, ifc_file, y_up=True))
 
     verts_arr = np.asarray(verts)
-    # Y-UPではY/Zが入れ替わる: 元のZ範囲[0,3]がYに、元のY範囲[2,5]がZに来る。
-    np.testing.assert_allclose(verts_arr.min(axis=0), [1.0, 0.0, 2.0], atol=1e-6)
-    np.testing.assert_allclose(verts_arr.max(axis=0), [5.0, 3.0, 5.0], atol=1e-6)
+    # X軸まわり-90°の回転 (x, y, z) -> (x, z, -y): 元のZ範囲[0,3]がYに、元のY範囲[2,5]が
+    # 符号反転してZ[-5,-2]に来る。単純なY/Z入れ替えだと鏡像になるため使わない(E10-3)。
+    np.testing.assert_allclose(verts_arr.min(axis=0), [1.0, 0.0, -5.0], atol=1e-6)
+    np.testing.assert_allclose(verts_arr.max(axis=0), [5.0, 3.0, -2.0], atol=1e-6)
 
 
 def test_get_space_geometry_yields_nothing_without_spaces(tmp_path):

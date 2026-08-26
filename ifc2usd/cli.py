@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 from . import __version__
 from .gltf import export_gltf
-from .ifc import create_settings, get_geometry, get_space_geometry
+from .ifc import GeometryData, create_settings, get_geometry, get_space_geometry
 from .mapping import MappingValidationError
 from .serve import build_serve_directory, make_server
 from .space_heatmap import build_space_voxel_json
@@ -53,10 +53,12 @@ def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
     geometries: dict = {}
     materials: dict = {}
     for verts, indices, norms, info, material, color, translate in tqdm(
-        get_geometry(settings, ifc_file, materials, y_up=y_up), desc="Reading geometry"
+        get_geometry(settings, ifc_file, materials), desc="Reading geometry"
     ):
         faces = [3] * (len(indices) // 3)
-        geometries[info["GlobalId"]] = [faces, verts, indices, material, color, norms, translate]
+        geometries[info["GlobalId"]] = GeometryData(
+            faces, verts, indices, material, color, norms, translate
+        )
 
     logger.info("Extracted %d geometries, %d materials", len(geometries), len(materials))
 
@@ -154,15 +156,19 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     up_axis = str(UsdGeom.GetStageUpAxis(stage))
     source_name = reference_path.name
 
+    # JSON と PointInstancer は同じ (要素, LOD) をボクセル化するので結果を共有する
+    voxel_cache: dict = {}
+
     result = build_voxel_json(
         elements,
         sizes=sizes,
         source={"usd": source_name, "generator": f"ifc2usd {__version__}"},
         up_axis=up_axis,
         fill=args.fill,
+        cache=voxel_cache,
     )
     json_path = output_base.with_suffix(".json")
-    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("Wrote voxel JSON: %s", json_path)
 
     usda_path = output_base.with_suffix(".usda")
@@ -174,6 +180,7 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         output_path=str(usda_path),
         up_axis=up_axis,
         fill=args.fill,
+        cache=voxel_cache,
     )
     logger.info("Wrote voxel PointInstancer layer: %s", usda_path)
     return 0
@@ -251,7 +258,7 @@ def _run_space_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParse
 
     output_path = args.output or _default_space_voxel_output(args.input_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("Wrote space voxels: %s", output_path)
     return 0
 

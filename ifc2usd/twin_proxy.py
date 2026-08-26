@@ -10,12 +10,17 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from .mapping import load_mapping_json
 from .twin import TwinApiError, TwinClient
+
+# 1 メトリックのリフレッシュで上流へ同時に投げる最大リクエスト数
+_MAX_FETCH_WORKERS = 8
 
 
 def load_twin_config(path: str | Path) -> dict:
@@ -51,14 +56,18 @@ class TwinProxy:
         bindings: Sequence[Mapping[str, object]],
         ttl_seconds: float,
         now: Callable[[], float] = time.monotonic,
+        max_workers: int = _MAX_FETCH_WORKERS,
     ) -> None:
         self._client = client
         self._ttl_seconds = ttl_seconds
         self._now = now
+        self._max_workers = max_workers
         self._points_by_metric: dict[str, list[Mapping[str, object]]] = {}
         for binding in bindings:
             self._points_by_metric.setdefault(binding["metric"], []).append(binding)
         self._cache: dict[str, tuple[float, list[dict]]] = {}
+        self._cache_lock = threading.Lock()
+        self._metric_locks: dict[str, threading.Lock] = {}
 
     def get_values(self, metric: str) -> dict:
         """`{"metric", "stale", "values": [{"pointId","value","unit","datetime","guid"?,"spaceGuid"?}, ...]}`。
@@ -74,29 +83,67 @@ class TwinProxy:
         あれば最後の成功値を`stale=True`で返し、キャッシュも無ければ最後に
         発生した`TwinApiError`をそのまま送出する（呼び出し側=HTTPハンドラが
         502等へ変換する）。
+
+        ポイントの取得は並列に行う（直列だと N 点 × タイムアウトのブロッキングに
+        なる）。また TTL 失効時に複数リクエストが重なっても、上流へのリフレッシュは
+        メトリック単位で1回にまとめる（キャッシュスタンピード対策、Issue #64）。
         """
         if metric not in self._points_by_metric:
             return {"metric": metric, "stale": False, "values": []}
 
-        cached = self._cache.get(metric)
-        if cached is not None and (self._now() - cached[0]) < self._ttl_seconds:
-            return {"metric": metric, "stale": False, "values": cached[1]}
+        fresh = self._fresh_cached_values(metric)
+        if fresh is not None:
+            return {"metric": metric, "stale": False, "values": fresh}
 
+        with self._lock_for(metric):
+            # ロック待ちの間に別スレッドが更新を終えていることがある
+            fresh = self._fresh_cached_values(metric)
+            if fresh is not None:
+                return {"metric": metric, "stale": False, "values": fresh}
+            return self._refresh(metric)
+
+    def _lock_for(self, metric: str) -> threading.Lock:
+        with self._cache_lock:
+            lock = self._metric_locks.get(metric)
+            if lock is None:
+                lock = self._metric_locks[metric] = threading.Lock()
+            return lock
+
+    def _fresh_cached_values(self, metric: str) -> Optional[list[dict]]:
+        with self._cache_lock:
+            cached = self._cache.get(metric)
+        if cached is not None and (self._now() - cached[0]) < self._ttl_seconds:
+            return cached[1]
+        return None
+
+    def _refresh(self, metric: str) -> dict:
+        bindings = self._points_by_metric[metric]
         values: list[dict] = []
         last_error: TwinApiError | None = None
-        for binding in self._points_by_metric[metric]:
-            try:
-                values.append(self._fetch_one(binding))
-            except TwinApiError as exc:
-                last_error = exc
+
+        with ThreadPoolExecutor(max_workers=min(self._max_workers, len(bindings))) as pool:
+            for entry, error in pool.map(self._fetch_one_or_error, bindings):
+                if entry is not None:
+                    values.append(entry)
+                else:
+                    last_error = error
 
         if not values and last_error is not None:
+            with self._cache_lock:
+                cached = self._cache.get(metric)
             if cached is not None:
                 return {"metric": metric, "stale": True, "values": cached[1]}
             raise last_error
 
-        self._cache[metric] = (self._now(), values)
+        with self._cache_lock:
+            self._cache[metric] = (self._now(), values)
         return {"metric": metric, "stale": False, "values": values}
+
+    def _fetch_one_or_error(self, binding: Mapping[str, object]):
+        try:
+            return self._fetch_one(binding), None
+        except TwinApiError as exc:
+            return None, exc
 
     def _fetch_one(self, binding: Mapping[str, object]) -> dict:
         latest = self._client.get_latest(binding["pointId"])

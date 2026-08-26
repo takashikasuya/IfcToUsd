@@ -343,12 +343,31 @@ def scene_origin(elements: Sequence[VoxelElement]) -> tuple[float, float, float]
     return tuple(np.min(mins, axis=0).tolist())
 
 
+def _voxels_for(element, size, origin, fill, cache):
+    """要素・LODごとの占有ボクセルを返す。
+
+    ``cache`` を渡すと JSON と PointInstancer の両ライターで結果を使い回せる
+    （Issue #63）。キーに origin/fill は含まないので、同じ origin/fill での
+    呼び出しの間だけ共有すること。
+    """
+    if cache is None:
+        return voxelize_mesh(element.vertices, element.indices, size, origin=origin, fill=fill)[1]
+
+    key = (element.guid, size)
+    voxels = cache.get(key)
+    if voxels is None:
+        voxels = voxelize_mesh(element.vertices, element.indices, size, origin=origin, fill=fill)[1]
+        cache[key] = voxels
+    return voxels
+
+
 def build_voxel_json(
     elements: Sequence[VoxelElement],
     sizes: Sequence[float],
     source: Optional[dict] = None,
     up_axis: str = "Z",
     fill: bool = False,
+    cache: Optional[dict] = None,
 ) -> dict:
     """`docs/viewer/spec.md` §2 のボクセル JSON（v3）を構築する。
 
@@ -373,7 +392,7 @@ def build_voxel_json(
         for el in elements:
             if not len(el.vertices):
                 continue
-            _, voxels = voxelize_mesh(el.vertices, el.indices, size, origin=origin, fill=fill)
+            voxels = _voxels_for(el, size, origin, fill, cache)
             indices = sorted(morton_encode(*v) for v in voxels)
             lod_elements.append(
                 {
@@ -469,6 +488,7 @@ def build_voxel_stage(
     reference_prim_path: str = "/IFC_Model",
     up_axis: str = "Z",
     fill: bool = False,
+    cache: Optional[dict] = None,
 ) -> str:
     """`docs/viewer/spec.md` §3 の PointInstancer ボクセルレイヤーを構築し、
     `output_path` へ書き出す。
@@ -535,7 +555,7 @@ def build_voxel_stage(
             for el in elements:
                 if not len(el.vertices):
                     continue
-                _, voxels = voxelize_mesh(el.vertices, el.indices, size, origin=origin, fill=fill)
+                voxels = _voxels_for(el, size, origin, fill, cache)
                 voxel_list = sorted(voxels)
 
                 start = len(positions)

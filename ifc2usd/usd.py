@@ -6,7 +6,6 @@ OpenUSD の現行 API（``MaterialBindingAPI.Apply`` など）に合わせて更
 
 from __future__ import annotations
 
-import copy
 import logging
 
 import numpy as np
@@ -21,6 +20,37 @@ logger = logging.getLogger(__name__)
 # ここを唯一の正本とする。
 MESH_PRIM_NAME = "mesh"
 
+# マテリアル配下の UsdPreviewSurface シェーダ prim の名前。usd.py / gltf.py が共有する
+PBR_SHADER_NAME = "PBRShader"
+
+# 空間エレメントの prim 名の基底。Site/Building は単一なら連番なしの従来名を保つ
+_SPATIAL_PRIM_BASE = {
+    "IfcSite": "Site",
+    "IfcBuilding": "Building",
+    "IfcBuildingStorey": "Storey",
+    "IfcSpace": "Space",
+}
+
+
+def _aggregated_children(model):
+    """IsDecomposedBy の全リレーションから子オブジェクトを列挙する（1本と仮定しない）。"""
+    for rel in getattr(model, "IsDecomposedBy", None) or []:
+        yield from rel.RelatedObjects
+
+
+def _contained_elements(model):
+    """ContainsElements の全リレーションから要素を列挙する。"""
+    for rel in getattr(model, "ContainsElements", None) or []:
+        yield from rel.RelatedElements
+
+
+def _spatial_prim_name(model, siblings, props) -> str:
+    cls = model.is_a()
+    base = _SPATIAL_PRIM_BASE.get(cls, cls)
+    if cls in ("IfcSite", "IfcBuilding") and sum(1 for s in siblings if s.is_a(cls)) == 1:
+        return base
+    return f"{base}_{props['id']}"
+
 
 def create_materials(stage, materials: dict) -> dict:
     """マテリアル辞書から UsdPreviewSurface マテリアルを作成する。
@@ -32,10 +62,11 @@ def create_materials(stage, materials: dict) -> dict:
     roughness = 1.0
     material_prims: dict = {}
 
-    for name, (diffuse, specular, transparency) in materials.items():
+    for name, spec in materials.items():
+        diffuse, transparency = spec
         path = Sdf.Path(f"/Materials/{name}")
         mat = UsdShade.Material.Define(stage, path)
-        shader = UsdShade.Shader.Define(stage, path.AppendChild("PBRShader"))
+        shader = UsdShade.Shader.Define(stage, path.AppendChild(PBR_SHADER_NAME))
         shader.CreateIdAttr("UsdPreviewSurface")
 
         shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
@@ -44,10 +75,6 @@ def create_materials(stage, materials: dict) -> dict:
         shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
         shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(metallic)
 
-        if specular:
-            shader.CreateInput("specularColor", Sdf.ValueTypeNames.Color3f).Set(
-                Gf.Vec3f(specular[0], specular[1], specular[2])
-            )
         if transparency:
             # IFC は transparency、UsdPreviewSurface は opacity なので変換する
             shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(1.0 - transparency)
@@ -61,23 +88,22 @@ def create_materials(stage, materials: dict) -> dict:
 
 def create_mesh(stage, path: str, geometry, material_prims: dict) -> None:
     """1 エレメント分のメッシュを USD 上に定義する。"""
-    faces, vertices, indices, material_name, color, normals, _translate = geometry
-
     mesh = UsdGeom.Mesh.Define(stage, f"{path}/{MESH_PRIM_NAME}")
-    mesh.CreatePointsAttr(vertices)
-    mesh.CreateFaceVertexCountsAttr(faces)
-    mesh.CreateFaceVertexIndicesAttr(indices)
+    mesh.CreatePointsAttr(geometry.vertices)
+    mesh.CreateFaceVertexCountsAttr(geometry.faces)
+    mesh.CreateFaceVertexIndicesAttr(geometry.indices)
     mesh.CreateExtentAttr(UsdGeom.PointBased(mesh).ComputeExtent(mesh.GetPointsAttr().Get()))
 
     # 法線を明示指定し、Catmull-Clark による再分割を無効化する
-    mesh.CreateNormalsAttr(normals)
+    mesh.CreateNormalsAttr(geometry.normals)
     mesh.CreateSubdivisionSchemeAttr("none")
     mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
     mesh.CreateDoubleSidedAttr(False)
 
+    color = geometry.color
     mesh.GetDisplayColorAttr().Set([Gf.Vec3f(color[0], color[1], color[2])])
 
-    mat = material_prims.get(material_name)
+    mat = material_prims.get(geometry.material_name)
     if mat is not None:
         UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
         UsdShade.MaterialBindingAPI(mesh).Bind(mat, UsdShade.Tokens.preview)
@@ -108,75 +134,80 @@ def append_prim(stage, props: dict, path: str, geometries: dict, material_prims:
 
     guid = props["GlobalId"]
     if guid in geometries:
-        geom_data = copy.copy(geometries[guid])
-        verts = geom_data[1]
-        t = geom_data[6]
-        # 変換行列 (3x3 回転 + 平行移動) を分解する
-        rows = [(t[i], t[i + 1], t[i + 2]) for i in range(0, 12, 3)]
-        offset = rows[3]
-        # rows[0:3] は X/Y/Z 基底ベクトル。列に並べて回転行列とし各頂点へ適用する
-        rotation = np.asarray((rows[0], rows[1], rows[2])).T
-        geom_data[1] = [rotation.dot(vert).tolist() for vert in verts]
+        from .ifc import decompose_transform  # 遅延 import で循環参照を避ける
 
-        UsdGeom.XformCommonAPI(prim).SetTranslate(offset)
+        geom_data = geometries[guid]
+        rotation, offset = decompose_transform(geom_data.transform)
+        world = geom_data._replace(vertices=(np.asarray(geom_data.vertices) @ rotation.T).tolist())
+
+        UsdGeom.XformCommonAPI(prim).SetTranslate(Gf.Vec3d(*offset))
         Usd.ModelAPI(prim).SetKind(Kind.Tokens.component)
-        create_mesh(stage, str(prim.GetPath()), geom_data, material_prims)
+        create_mesh(stage, str(prim.GetPath()), world, material_prims)
     return prim
 
 
 def build_stage(ifc_file, geometries: dict, materials: dict, output_path: str, y_up: bool = False) -> None:
     """geometries / materials から USD ステージを構築し、ファイルへ書き出す。"""
     stage = Usd.Stage.CreateInMemory()
-    # シーンの単位を m にする
+    # IfcOpenShell はジオメトリを常にメートルへ正規化して返すため 1.0 が正しい
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y if y_up else UsdGeom.Tokens.z)
 
     model_root = stage.DefinePrim("/IFC_Model", "Xform")
     Usd.ModelAPI(model_root).SetKind(Kind.Tokens.assembly)
     stage.SetDefaultPrim(model_root)
+    if y_up:
+        # ジオメトリは IFC の Z-UP のまま。ルートで 1 回だけ回して Y-UP へ揃える
+        UsdGeom.XformCommonAPI(model_root).SetRotate(Gf.Vec3f(-90.0, 0.0, 0.0))
 
     material_prims = create_materials(stage, materials)
 
-    from .ifc import get_properties  # 遅延 import で循環参照を避ける
+    from .ifc import get_length_unit_scale, get_properties  # 遅延 import で循環参照を避ける
+
+    # 正規化前の記述単位は USD 側からは復元できないので記録しておく
+    model_root.SetCustomDataByKey("ifcLengthUnitScale", get_length_unit_scale(ifc_file))
+
+    placed: set[str] = set()
+
+    def place(props, path):
+        placed.add(props["GlobalId"])
+        return append_prim(stage, props, path, geometries, material_prims)
 
     def proc_elements(model, prim):
-        for rel in model.ContainsElements:
-            for element in rel.RelatedElements:
-                props = get_properties(element)
-                elem_prim = append_prim(
-                    stage, props, f"{prim.GetPath()}/Element_{props['id']}", geometries, material_prims
-                )
-                if len(element.IsDecomposedBy) > 0:
-                    for obj_model in element.IsDecomposedBy[0].RelatedObjects:
-                        props = get_properties(obj_model)
-                        append_prim(
-                            stage, props, f"{elem_prim.GetPath()}/Object_{props['id']}", geometries, material_prims
-                        )
+        for element in _contained_elements(model):
+            props = get_properties(element)
+            elem_prim = place(props, f"{prim.GetPath()}/Element_{props['id']}")
+            for obj_model in _aggregated_children(element):
+                props = get_properties(obj_model)
+                place(props, f"{elem_prim.GetPath()}/Object_{props['id']}")
 
-    props = get_properties(ifc_file.by_type("IfcSite")[0])
-    site = append_prim(stage, props, f"{model_root.GetPath()}/Site", geometries, material_prims)
+    def proc_spatial(model, parent_prim, siblings):
+        props = get_properties(model)
+        prim = place(props, f"{parent_prim.GetPath()}/{_spatial_prim_name(model, siblings, props)}")
+        proc_elements(model, prim)
 
-    props = get_properties(ifc_file.by_type("IfcBuilding")[0])
-    building = append_prim(stage, props, f"{site.GetPath()}/Building", geometries, material_prims)
+        children = list(_aggregated_children(model))
+        for child in children:
+            proc_spatial(child, prim, children)
 
-    for storey_model in ifc_file.by_type("IfcBuildingStorey"):
-        props = get_properties(storey_model)
-        storey_prim = append_prim(
-            stage, props, f"{building.GetPath()}/Storey_{props['id']}", geometries, material_prims
+    project = ifc_file.by_type("IfcProject")
+    roots = list(_aggregated_children(project[0])) if project else []
+    if not roots:
+        # IfcProject からの分解が無いモデルでも、空間ルートだけは拾い上げる
+        roots = [s for s in ifc_file.by_type("IfcSpatialStructureElement") if not s.Decomposes]
+    if not any(r.is_a("IfcSite") for r in roots):
+        logger.warning("IfcSite が空間階層のルートに見つかりません。Site 階層を省略して構築します")
+
+    for root in roots:
+        proc_spatial(root, model_root, roots)
+
+    unplaced = sorted(set(geometries) - placed)
+    if unplaced:
+        logger.warning(
+            "空間階層に配置されていない要素が %d 件あります（ジオメトリは出力されません）: %s",
+            len(unplaced),
+            ", ".join(unplaced[:10]) + (" ..." if len(unplaced) > 10 else ""),
         )
-
-        if storey_model.ContainsElements:
-            proc_elements(storey_model, storey_prim)
-
-        if len(storey_model.IsDecomposedBy) > 0:
-            assert len(storey_model.IsDecomposedBy) == 1
-            for space_model in storey_model.IsDecomposedBy[0].RelatedObjects:
-                props = get_properties(space_model)
-                space = append_prim(
-                    stage, props, f"{storey_prim.GetPath()}/Space_{props['id']}", geometries, material_prims
-                )
-                if space_model.ContainsElements:
-                    proc_elements(space_model, space)
 
     stage.Export(output_path)
 
@@ -206,7 +237,7 @@ def elements_from_stage(stage) -> list[VoxelElement]:
         color = (0.0, 0.0, 0.0)
         mat_path = UsdShade.MaterialBindingAPI(mesh).GetDirectBinding().GetMaterialPath()
         if mat_path:
-            shader = UsdShade.Shader(stage.GetPrimAtPath(mat_path.AppendChild("PBRShader")))
+            shader = UsdShade.Shader(stage.GetPrimAtPath(mat_path.AppendChild(PBR_SHADER_NAME)))
             diffuse = shader.GetInput("diffuseColor").Get()
             if diffuse is not None:
                 color = (diffuse[0], diffuse[1], diffuse[2])

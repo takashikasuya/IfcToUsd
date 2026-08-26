@@ -160,3 +160,60 @@ flowchart LR
 3. **Sprint 3**: E3-2, E3-3, E3-4, E3-5（Web ビューワー表示・選択）
 4. **Sprint 4**: E3-6, E3-7, E3-8, E1-6, E4-1（ボクセル統合と仕上げ）
 5. 以降: E3-9, E3-10, E4-2 → P2 エピックは需要に応じて着手
+
+## Epic E11: 大規模フェデレーションモデルの性能・配信最適化
+
+`files/kawasaki-model.ifc`（IFC2X3、192 MB、3 Site / 3 Building / 21 Storey、
+7,267メッシュ）を E10 実装後に変換・表示して得た実測に基づくフォローアップ。
+詳細な計測値とキャプチャは `output/report/index.html` にある。
+
+### 実測ベースライン（2026-08-26）
+
+| 観点 | 実測値 | ボトルネック / 所見 |
+| --- | ---: | --- |
+| IFC → USD変換 | 498秒 | E10-6の残課題（IfcOpenShell形状生成・ピークメモリ） |
+| ASCII USD (`.usda`) | 322.1 MB / cold open 75.9秒 | テキスト解析が支配的 |
+| Binary USD (`.usdc`) | 78.9 MB / cold open 0.27秒 | `.usda`比 4.1分の1、cold open 約280倍高速 |
+| GLB | 103.7 MB / 7,267 primitives | 5,374,470頂点のうち同一(position, normal)は3,726,610（30.7%重複） |
+| Web初回表示 | 8.7秒（localhost / Chromium headless） | GLB 103.7 MBを読んだ後、voxels.jsonを直列ロード |
+| Web描画 | 7,267 draw calls / 2,394,902 triangles（Both） | 1要素=1 Mesh=1 draw call |
+| ボクセル化 | 246.7秒（2.0 m + 1.0 m） | 22,046 / 50,351 voxels、JSON+USD同時計算 |
+| Web配信アセット | GLB 103.7 MB + scene.json 3.0 MB + voxels.json 1.8 MB | GLBが総量の95%以上 |
+
+3つの Building は空間的にほぼ重なっており、別棟ではなく意匠・構造・設備等の
+専門分野モデルを統合した**フェデレーションモデル**と判断できる。したがって、
+空間タイルだけでなく Site / Building（分野）単位の選択ロードも有効な最適化軸になる。
+
+### ストーリー
+
+| ID | ストーリー | 優先度 | 規模 | Issue | 受け入れ条件 |
+| --- | --- | --- | --- | --- | --- |
+| E11-1 | 大規模モデルの既定/推奨USDを `.usdc` 化（`.usda` は明示選択へ）。拡張子・CLIヘルプ・READMEを整合 | P1 | S | [#70](https://github.com/takashikasuya/IfcToUsd/issues/70) | kawasakiで78.9 MB以下、cold `Stage.Open` 1秒以内。既存 `.usda` 指定は後方互換 |
+| E11-2 | 大規模モデル性能ハーネス: 変換時間・cold open・GLB/JSONサイズ・初回表示・draw calls・フレーム時間p50/p95を同一手順で記録 | P1 | S | [#71](https://github.com/takashikasuya/IfcToUsd/issues/71) | `output/report/metrics.json` 相当を1コマンドで生成。CIは軽量fixture、kawasakiは手動/夜間計測 |
+| E11-3 | glTFのface-corner全複製を廃止し、同一 `(position, normal)` をロスレス再インデックス | P1 | M | [#72](https://github.com/takashikasuya/IfcToUsd/issues/72) | kawasakiのGLB頂点を5,374,470→3,726,610以下（30%以上削減）。法線・色・GUID・階層・画素E2Eが等価 |
+| E11-4 | GLBへEXT_meshopt圧縮を導入（E11-3後）。decoderをvendoringしオフライン動作を維持 | P1 | M | [#73](https://github.com/takashikasuya/IfcToUsd/issues/73) | kawasaki GLBを再インデックス後の60%以下、初回表示を8.7秒未満。`extras.guid` 7,330件と選択E2Eを維持 |
+| E11-5 | 段階的初期表示: 既定をMesh表示にし、GLB描画完了を先に通知。voxels/SDF/twin/spaceVoxelsは必要時ロード | P1 | M | [#74](https://github.com/takashikasuya/IfcToUsd/issues/74) | GLB描画後すぐ操作可能。Voxel選択時に初回ロード状態を表示し、二重fetchなし。付加アセット失敗時もメッシュ操作可 |
+| E11-6 | メッシュ描画を material 単位の `THREE.BatchedMesh` 等へ再構成しdraw callを削減 | P1 | L | [#75](https://github.com/takashikasuya/IfcToUsd/issues/75) | kawasakiで7,267→200以下。GUID選択・レイキャスト・階層表示切替・ghost/isolate・live着色を維持、フレーム時間p95を改善 |
+| E11-7 | フェデレーション分割: Site / Building単位のGLBチャンク生成・選択ロード（E6-1の空間3D Tilesとは別軸） | P2 | L | [#76](https://github.com/takashikasuya/IfcToUsd/issues/76) | scene.jsonがチャンクとGUID範囲を記述。1分野だけロード可能で、3分野ロード時は現行と同じ見た目・選択結果 |
+| E11-8 | クリック選択E2Eの間欠失敗（Wall Northをfit後にWall Eastが選ばれる）を再現・修正 | P1 | S | [#77](https://github.com/takashikasuya/IfcToUsd/issues/77) | 対象テスト100回連続成功。固定sleep禁止。OrbitControls damping / raycast時点のカメラ状態を計測して原因を特定 |
+
+### 既存バックログとの境界
+
+- **E10-6 / Issue #63**: IFC変換時間、ピークメモリ、flood-fill、ボクセル化のCPU性能は
+    引き続きこちらで追跡する。kawasakiの `convert=498秒` / `voxelize=246.7秒` を新しい
+    ベースラインとしてIssueへ追記する。E11は主に**成果物形式・Web配信・GPU描画**を扱う。
+- **E6-1（3D Tiles）**: 複数棟・都市規模での空間ストリーミングという長期案。
+    E11-7は、今回判明した「同一座標に重なる分野別フェデレーション」を Site / Building
+    階層で分割する短中期案であり、空間タイルとは併存できる。
+- **E4-3（USD payload）**: USDネイティブ経路（usdview等）の遅延ロード。
+    WebビューワーはUSDを読まないため、E11-5/E11-7とは別経路。
+
+### 推奨実施順序
+
+1. **E11-2**（先に計測を固定。以降の改善を数値で判定可能にする）
+2. **E11-1**（最小変更で容量4.1分の1・cold open約280倍。即効性最大）
+3. **E11-3 → E11-4**（GLBの構造的重複を除いてから圧縮）
+4. **E11-5**（初回表示と付加アセットの責務を分離）
+5. **E11-6**（選択・可視性契約を壊しうるため、計測/E2Eを揃えた後）
+6. **E11-7**（チャンク契約を追加するアーキテクチャ変更）
+7. **E11-8** は独立。フレークのため早期着手可能

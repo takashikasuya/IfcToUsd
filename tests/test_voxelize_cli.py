@@ -24,7 +24,7 @@ def test_voxelize_from_usda(tmp_path):
 
     json_path = out_base.with_suffix(".json")
     assert json_path.is_file()
-    data = json.loads(json_path.read_text())
+    data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data["version"] == 3
     assert len(data["lods"]) == 1
     assert data["lods"][0]["size"] == 0.5
