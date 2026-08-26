@@ -347,18 +347,30 @@ def _voxels_for(element, size, origin, fill, cache):
     """要素・LODごとの占有ボクセルを返す。
 
     ``cache`` を渡すと JSON と PointInstancer の両ライターで結果を使い回せる
-    （Issue #63）。キーに origin/fill は含まないので、同じ origin/fill での
-    呼び出しの間だけ共有すること。
+    （Issue #63）。origin/fillもキーに含め、異なる格子条件の結果が混ざらないようにする。
     """
     if cache is None:
         return voxelize_mesh(element.vertices, element.indices, size, origin=origin, fill=fill)[1]
 
-    key = (element.guid, size)
+    key = (element.guid, size, tuple(origin), fill)
     voxels = cache.get(key)
     if voxels is None:
         voxels = voxelize_mesh(element.vertices, element.indices, size, origin=origin, fill=fill)[1]
         cache[key] = voxels
     return voxels
+
+
+def populate_voxel_cache(
+    elements: Sequence[VoxelElement],
+    size: float,
+    origin: Sequence[float],
+    fill: bool,
+    cache: dict,
+) -> None:
+    """Populate one LOD's occupancy results for reuse by all voxel writers."""
+    for element in elements:
+        if len(element.vertices):
+            _voxels_for(element, size, origin, fill, cache)
 
 
 def build_voxel_json(

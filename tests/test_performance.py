@@ -93,11 +93,37 @@ def test_comparison_markdown_reports_baseline_and_percent_delta():
     assert "GLB size" in summary
 
 
+def test_comparison_markdown_includes_current_voxel_phases():
+    baseline = _metrics()
+    current = deepcopy(baseline)
+    current["operations"]["voxelize"]["phases"] = {
+        "usdOpenSeconds": 0.1,
+        "elementsFromStageSeconds": 0.2,
+        "occupancyBySizeSeconds": {"0.5": 0.3},
+        "jsonBuildSeconds": 0.01,
+        "jsonWriteSeconds": 0.02,
+        "pointInstancerBuildSeconds": 0.04,
+    }
+
+    summary = comparison_markdown(current, baseline)
+
+    assert "Current voxel phases" in summary
+    assert "| Element extraction | 0.200 s |" in summary
+
+
 def test_current_summary_explains_how_to_supply_a_baseline():
     summary = performance.current_summary_markdown(_metrics())
 
     assert "No baseline was supplied" in summary
     assert "Convert time" in summary
+
+
+def test_voxel_profile_loader_rejects_missing_phases(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"version": 1, "totalSeconds": 1.0}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="malformed voxel profile phases"):
+        performance._load_voxel_profile(profile_path)
 
 
 def test_measure_process_uses_child_process_and_records_peak_rss(tmp_path):
@@ -109,7 +135,7 @@ def test_measure_process_uses_child_process_and_records_peak_rss(tmp_path):
             (
                 "from pathlib import Path; import os, time; "
                 f"Path({str(pid_path)!r}).write_text(str(os.getpid())); "
-                "allocation = bytearray(64 * 1024 * 1024); time.sleep(0.1)"
+                "allocation = bytearray(64 * 1024 * 1024); time.sleep(0.6)"
             ),
         ]
     )
@@ -150,6 +176,24 @@ def test_run_benchmark_writes_metrics_and_comparison(monkeypatch, tmp_path):
             output_base = Path(command[command.index("-o") + 1])
             output_base.with_suffix(".json").write_text("{}", encoding="utf-8")
             output_base.with_suffix(".usda").write_bytes(b"voxels")
+            profile_path = Path(command[command.index("--profile") + 1])
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "totalSeconds": 0.08,
+                        "phases": {
+                            "usdOpenSeconds": 0.01,
+                            "elementsFromStageSeconds": 0.02,
+                            "occupancyBySizeSeconds": {"0.5": 0.03},
+                            "jsonBuildSeconds": 0.01,
+                            "jsonWriteSeconds": 0.005,
+                            "pointInstancerBuildSeconds": 0.005,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
         return ProcessMeasurement(seconds=0.1, peak_rss_bytes=1024)
 
     monkeypatch.setattr(performance, "measure_process", fake_measure)
@@ -175,7 +219,12 @@ def test_run_benchmark_writes_metrics_and_comparison(monkeypatch, tmp_path):
     assert metrics["cachePolicy"] == {
         "processes": "cold",
         "browser": "cold-new-browser",
+        "rssSampleIntervalSeconds": 0.25 if sys.platform == "win32" else 0.05,
     }
+    assert metrics["operations"]["voxelize"]["phases"]["occupancyBySizeSeconds"] == {
+        "0.5": 0.03
+    }
+    assert metrics["artifacts"]["voxelProfile"]["path"].endswith("_voxel_profile.json")
 
 
 def test_benchmark_cli_forwards_paths_sizes_and_baseline(monkeypatch, tmp_path):
