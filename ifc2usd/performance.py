@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import platform
 from pathlib import Path
 import shutil
@@ -128,34 +130,102 @@ def comparison_markdown(current: dict[str, Any], baseline: dict[str, Any]) -> st
     return "\n".join(lines) + "\n"
 
 
+class _ProcessMemoryCounters(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("PageFaultCount", ctypes.c_ulong),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+class _ProcessEntry32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+def _windows_process_tree_pids(root_pid: int) -> set[int]:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32))
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32))
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snapshot == wintypes.HANDLE(-1).value:
+        return {root_pid}
+    parents: dict[int, int] = {}
+    try:
+        entry = _ProcessEntry32(dwSize=ctypes.sizeof(_ProcessEntry32))
+        if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            while True:
+                parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    tree = {root_pid}
+    while True:
+        children = {pid for pid, parent in parents.items() if parent in tree}
+        expanded = tree | children
+        if expanded == tree:
+            return tree
+        tree = expanded
+
+
+def _windows_process_rss_bytes(pid: int) -> int:
+    counters = _ProcessMemoryCounters(ctypes.sizeof(_ProcessMemoryCounters))
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    psapi.GetProcessMemoryInfo.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ProcessMemoryCounters),
+        wintypes.DWORD,
+    )
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(0x0410, False, pid)
+    if not handle:
+        return 0
+    try:
+        if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return int(counters.WorkingSetSize)
+        return 0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _process_rss_bytes(process: subprocess.Popen[str]) -> int:
     if sys.platform == "win32":
-        class ProcessMemoryCounters(ctypes.Structure):
-            _fields_ = [
-                ("cb", ctypes.c_ulong),
-                ("PageFaultCount", ctypes.c_ulong),
-                ("PeakWorkingSetSize", ctypes.c_size_t),
-                ("WorkingSetSize", ctypes.c_size_t),
-                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                ("PagefileUsage", ctypes.c_size_t),
-                ("PeakPagefileUsage", ctypes.c_size_t),
-            ]
-
-        counters = ProcessMemoryCounters(ctypes.sizeof(ProcessMemoryCounters))
-        handle = ctypes.windll.kernel32.OpenProcess(0x0410, False, process.pid)
-        if not handle:
-            return 0
-        try:
-            if ctypes.windll.psapi.GetProcessMemoryInfo(
-                handle, ctypes.byref(counters), counters.cb
-            ):
-                return int(counters.WorkingSetSize)
-            return 0
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+        return sum(
+            _windows_process_rss_bytes(pid)
+            for pid in _windows_process_tree_pids(process.pid)
+        )
 
     status_path = Path(f"/proc/{process.pid}/status")
     if status_path.is_file():
@@ -290,8 +360,24 @@ def measure_viewer(
         if thread.is_alive():
             raise RuntimeError("benchmark HTTP server did not stop cleanly")
 
+    return summarize_viewer_metrics(
+        first_mesh=first_mesh,
+        all_assets=all_assets,
+        frame_times=frame_times,
+        render=render,
+    )
+
+
+def summarize_viewer_metrics(
+    *,
+    first_mesh: float,
+    all_assets: float,
+    frame_times: list[float],
+    render: dict[str, int],
+) -> dict[str, Any]:
+    """Validate and summarize browser observations without hiding long stalls."""
     ordered = sorted(float(value) for value in frame_times)
-    if len(ordered) < 100 or any(value <= 0 or value >= 1000 for value in ordered):
+    if len(ordered) < 100 or any(value <= 0 or not math.isfinite(value) for value in ordered):
         raise RuntimeError("viewer returned invalid animation frame measurements")
     if any(not isinstance(render.get(key), int) or render[key] < 0 for key in (
         "drawCalls", "triangles", "geometries"
@@ -345,7 +431,8 @@ def run_benchmark(
         validate_metrics(baseline)
 
     report_dir.mkdir(parents=True, exist_ok=True)
-    for report_path in (report_dir / "metrics.json", report_dir / "comparison.md"):
+    progress_path = report_dir / "progress.json"
+    for report_path in (report_dir / "metrics.json", report_dir / "comparison.md", progress_path):
         report_path.unlink(missing_ok=True)
     artifacts_dir = report_dir / "artifacts"
     viewer_dir = report_dir / "viewer"
@@ -360,10 +447,19 @@ def run_benchmark(
     voxel_json_path = voxel_base.with_suffix(".json")
     voxel_usd_path = voxel_base.with_suffix(".usda")
     executable = sys.executable
+    completed_operations: dict[str, dict[str, float | int]] = {}
+
+    def checkpoint(name: str, measurement: ProcessMeasurement) -> None:
+        completed_operations[name] = _operation(measurement)
+        progress_path.write_text(
+            json.dumps({"operations": completed_operations}, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     convert = measure_process(
         [executable, "-m", "ifc2usd", "convert", str(ifc_path), "-o", str(usd_path)]
     )
+    checkpoint("convert", convert)
     usd_open = measure_process(
         [
             executable,
@@ -376,9 +472,11 @@ def run_benchmark(
             str(usd_path),
         ]
     )
+    checkpoint("usdColdOpen", usd_open)
     export_gltf = measure_process(
         [executable, "-m", "ifc2usd", "export-gltf", str(usd_path), "-o", str(glb_path)]
     )
+    checkpoint("exportGltf", export_gltf)
     voxel_command = [
         executable,
         "-m",
@@ -391,6 +489,7 @@ def run_benchmark(
     for size in voxel_sizes:
         voxel_command.extend(("--size", str(size)))
     voxelize = measure_process(voxel_command)
+    checkpoint("voxelize", voxelize)
     viewer = measure_viewer(
         usd_path,
         viewer_dir,
@@ -432,4 +531,5 @@ def run_benchmark(
     else:
         summary = comparison_markdown(metrics, baseline)
     (report_dir / "comparison.md").write_text(summary, encoding="utf-8")
+    progress_path.unlink(missing_ok=True)
     return metrics

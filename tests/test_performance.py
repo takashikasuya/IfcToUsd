@@ -106,13 +106,29 @@ def test_measure_process_uses_child_process_and_records_peak_rss(tmp_path):
         [
             sys.executable,
             "-c",
-            f"from pathlib import Path; Path({str(pid_path)!r}).write_text(str(__import__('os').getpid()))",
+            (
+                "from pathlib import Path; import os, time; "
+                f"Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+                "allocation = bytearray(64 * 1024 * 1024); time.sleep(0.1)"
+            ),
         ]
     )
 
     assert int(pid_path.read_text()) != os.getpid()
     assert result.seconds >= 0
-    assert result.peak_rss_bytes > 0
+    assert result.peak_rss_bytes >= 64 * 1024 * 1024
+
+
+def test_viewer_metrics_preserve_long_frame_stalls():
+    metrics = performance.summarize_viewer_metrics(
+        first_mesh=1.0,
+        all_assets=2.0,
+        frame_times=[16.0] * 113 + [1500.0] * 7,
+        render={"drawCalls": 10, "triangles": 20, "geometries": 5},
+    )
+
+    assert metrics["frameTimeMs"]["p95"] == 1500.0
+    assert metrics["frameTimeMs"]["samples"] == 120
 
 
 def test_run_benchmark_writes_metrics_and_comparison(monkeypatch, tmp_path):
