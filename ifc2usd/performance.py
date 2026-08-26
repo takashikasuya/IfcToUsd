@@ -27,6 +27,7 @@ from typing import Any
 from . import __version__
 
 METRICS_SCHEMA_VERSION = 1
+_RSS_SAMPLE_INTERVAL_SECONDS = 0.25 if sys.platform == "win32" else 0.05
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,27 @@ def comparison_markdown(current: dict[str, Any], baseline: dict[str, Any]) -> st
         lines.append(
             f"| {label} | {_format_value(old, unit)} | {_format_value(new, unit)} | {delta} |"
         )
+    _append_voxel_phases(lines, current)
     return "\n".join(lines) + "\n"
+
+
+def _append_voxel_phases(lines: list[str], metrics: dict[str, Any]) -> None:
+    phases = metrics.get("operations", {}).get("voxelize", {}).get("phases")
+    if not isinstance(phases, dict):
+        return
+    rows = [
+        ("USD open", phases["usdOpenSeconds"]),
+        ("Element extraction", phases["elementsFromStageSeconds"]),
+        *[
+            (f"Occupancy {size} m", value)
+            for size, value in phases["occupancyBySizeSeconds"].items()
+        ],
+        ("JSON build", phases["jsonBuildSeconds"]),
+        ("JSON write", phases["jsonWriteSeconds"]),
+        ("PointInstancer", phases["pointInstancerBuildSeconds"]),
+    ]
+    lines.extend(["", "## Current voxel phases", "", "| Phase | Time |", "| --- | ---: |"])
+    lines.extend(f"| {name} | {value:.3f} s |" for name, value in rows)
 
 
 class _ProcessMemoryCounters(ctypes.Structure):
@@ -262,7 +283,7 @@ def measure_process(command: list[str], *, cwd: Path | None = None) -> ProcessMe
                 peak_rss = max(peak_rss, _process_rss_bytes(process))
             except OSError:
                 pass
-            time.sleep(0.01)
+            time.sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
 
         elapsed = time.perf_counter() - started
         if process.returncode:
@@ -288,6 +309,42 @@ def _artifact(path: Path) -> dict[str, str | int]:
     if not path.is_file():
         raise FileNotFoundError(f"expected benchmark artifact not found: {path}")
     return {"path": str(path), "sizeBytes": path.stat().st_size}
+
+
+def _load_voxel_profile(path: Path) -> dict[str, Any]:
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    if profile.get("version") != 1:
+        raise ValueError(f"unsupported voxel profile version: {profile.get('version')!r}")
+    phases = profile.get("phases")
+    required = {
+        "usdOpenSeconds",
+        "elementsFromStageSeconds",
+        "occupancyBySizeSeconds",
+        "jsonBuildSeconds",
+        "jsonWriteSeconds",
+        "pointInstancerBuildSeconds",
+    }
+    if not isinstance(phases, dict) or set(phases) != required:
+        raise ValueError(f"malformed voxel profile phases: {path}")
+
+    def valid_timing(value: Any) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    if not valid_timing(profile.get("totalSeconds")):
+        raise ValueError(f"malformed voxel profile totalSeconds: {path}")
+    occupancy = phases["occupancyBySizeSeconds"]
+    scalar_values = [value for name, value in phases.items() if name != "occupancyBySizeSeconds"]
+    if not isinstance(occupancy, dict) or not all(
+        valid_timing(value)
+        for value in [*scalar_values, *occupancy.values(), profile["totalSeconds"]]
+    ):
+        raise ValueError(f"malformed voxel profile timings: {path}")
+    return profile
 
 
 def measure_viewer(
@@ -411,6 +468,7 @@ def current_summary_markdown(metrics: dict[str, Any]) -> str:
     ]
     for label, path, unit in _comparison_rows():
         lines.append(f"| {label} | {_format_value(float(_value_at(metrics, path)), unit)} |")
+    _append_voxel_phases(lines, metrics)
     return "\n".join(lines) + "\n"
 
 
@@ -446,6 +504,7 @@ def run_benchmark(
     voxel_base = artifacts_dir / f"{ifc_path.stem}_voxels"
     voxel_json_path = voxel_base.with_suffix(".json")
     voxel_usd_path = voxel_base.with_suffix(".usda")
+    voxel_profile_path = artifacts_dir / f"{ifc_path.stem}_voxel_profile.json"
     executable = sys.executable
     completed_operations: dict[str, dict[str, float | int]] = {}
 
@@ -485,11 +544,14 @@ def run_benchmark(
         str(usd_path),
         "-o",
         str(voxel_base),
+        "--profile",
+        str(voxel_profile_path),
     ]
     for size in voxel_sizes:
         voxel_command.extend(("--size", str(size)))
     voxelize = measure_process(voxel_command)
     checkpoint("voxelize", voxelize)
+    voxel_profile = _load_voxel_profile(voxel_profile_path)
     viewer = measure_viewer(
         usd_path,
         viewer_dir,
@@ -499,7 +561,11 @@ def run_benchmark(
     metrics = {
         "schemaVersion": METRICS_SCHEMA_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "cachePolicy": {"processes": "cold", "browser": "cold-new-browser"},
+        "cachePolicy": {
+            "processes": "cold",
+            "browser": "cold-new-browser",
+            "rssSampleIntervalSeconds": _RSS_SAMPLE_INTERVAL_SECONDS,
+        },
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -510,13 +576,18 @@ def run_benchmark(
             "convert": _operation(convert),
             "usdColdOpen": _operation(usd_open),
             "exportGltf": _operation(export_gltf),
-            "voxelize": _operation(voxelize),
+            "voxelize": {
+                **_operation(voxelize),
+                "phases": voxel_profile["phases"],
+                "profiledTotalSeconds": voxel_profile["totalSeconds"],
+            },
         },
         "artifacts": {
             "usd": _artifact(usd_path),
             "glb": _artifact(glb_path),
             "voxelJson": _artifact(voxel_json_path),
             "voxelUsd": _artifact(voxel_usd_path),
+            "voxelProfile": _artifact(voxel_profile_path),
         },
         "viewer": viewer,
     }

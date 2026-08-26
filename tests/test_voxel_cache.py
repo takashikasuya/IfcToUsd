@@ -50,7 +50,17 @@ def test_shared_cache_voxelizes_each_element_and_size_once(monkeypatch, tmp_path
     assert len(calls) == len(ELEMENTS) * len(SIZES)
 
 
-def test_results_match_the_uncached_path(monkeypatch, tmp_path):
+def test_results_match_the_uncached_path():
     cached = build_voxel_json(ELEMENTS, sizes=SIZES, cache={})
     plain = build_voxel_json(ELEMENTS, sizes=SIZES)
     assert cached == plain
+
+
+def test_shared_cache_separates_fill_modes(monkeypatch):
+    calls = _counting_voxelize(monkeypatch)
+    cache: dict = {}
+
+    build_voxel_json(ELEMENTS, sizes=[1.0], fill=False, cache=cache)
+    build_voxel_json(ELEMENTS, sizes=[1.0], fill=True, cache=cache)
+
+    assert len(calls) == 2

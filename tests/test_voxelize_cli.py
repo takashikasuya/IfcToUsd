@@ -32,6 +32,52 @@ def test_voxelize_from_usda(tmp_path):
     assert len(guids) == 2  # 壁2枚
 
 
+def test_voxelize_profile_records_phase_and_lod_timings(tmp_path):
+    usda = tmp_path / "minimal.usda"
+    convert(FIXTURE, usda)
+
+    out_base = tmp_path / "voxels"
+    profile_path = tmp_path / "voxel-profile.json"
+    exit_code = main(
+        [
+            "voxelize",
+            str(usda),
+            "--size",
+            "0.5",
+            "--size",
+            "0.25",
+            "--size",
+            "0.5",
+            "--profile",
+            str(profile_path),
+            "-o",
+            str(out_base),
+        ]
+    )
+
+    assert exit_code == 0
+    assert out_base.with_suffix(".json").is_file()
+    assert out_base.with_suffix(".usda").is_file()
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert profile["version"] == 1
+    assert list(profile["phases"]["occupancyBySizeSeconds"]) == ["0.5", "0.25"]
+    assert set(profile["phases"]) == {
+        "usdOpenSeconds",
+        "elementsFromStageSeconds",
+        "occupancyBySizeSeconds",
+        "jsonBuildSeconds",
+        "jsonWriteSeconds",
+        "pointInstancerBuildSeconds",
+    }
+    phase_values = [
+        value
+        for name, value in profile["phases"].items()
+        if name != "occupancyBySizeSeconds"
+    ] + list(profile["phases"]["occupancyBySizeSeconds"].values())
+    assert all(value >= 0 for value in phase_values)
+    assert profile["totalSeconds"] >= sum(phase_values)
+
+
 def test_voxelize_also_writes_pointinstancer_usda(tmp_path):
     """docs/viewer/spec.md §1.1: voxelizeは<base>.jsonに加え<base>.usda
     （PointInstancerレイヤー、§3）も出力する。"""

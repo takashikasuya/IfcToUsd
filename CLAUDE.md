@@ -17,6 +17,7 @@ uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.
 uv run ifc2usd <ifc> -o <out.usda> --y-up --verbose
 uv run python -m ifc2usd <ifc>            # equivalent module entry point
 uv run ifc2usd voxelize <usdc|ifc> --size 1.0 --size 0.5   # -> <base>.json + <base>.usda
+uv run ifc2usd voxelize <usdc> --size 1.0 --profile <profile.json>  # E10-6 phase timings
 uv run ifc2usd export-gltf <usdc> -o <out.glb>
 uv run ifc2usd space-voxelize <ifc> --reference <usdc> --size 0.5 -o <out.json>  # E9-5 space heatmap prerequisite
 uv run ifc2usd serve <usdc>                                # local web viewer, http://127.0.0.1:8000
@@ -72,6 +73,10 @@ The `ifc2usd/` package is the deliverable. It is a clean-room refactor of `IFC_t
   `decode_morton_indices`, Issue #38 / E7-4) rather than a flat integer list; `viewer.js`'s
   `decodeMortonIndices` decodes that form but also passes a plain array through unchanged, so
   v2-shaped `indices` (older files, or the client-side v1→current converter) still load.
+  `voxelize --profile` pre-populates the same shared `(guid, size)` cache one LOD at a time and
+  records USD open, element extraction, occupancy, JSON, and PointInstancer timings without
+  changing either output. On Windows, benchmark RSS polling is intentionally limited to 4 Hz;
+  Toolhelp process-tree snapshots at 100 Hz caused severe observer overhead on Kawasaki.
 - `space_heatmap.py` (E9-5) — space/voxel heatmap aggregation. `build_space_voxel_index()`
   voxelizes each `IfcSpace` (`fill=True`) into a `{morton_code: spaceGuid}` map; overlapping
   cells (adjacent-space boundaries) go to whichever space has fewer filled voxels (a volume

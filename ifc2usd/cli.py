@@ -22,6 +22,7 @@ import sys
 import tempfile
 import webbrowser
 from pathlib import Path
+from time import perf_counter
 
 import ifcopenshell
 from pxr import Usd, UsdGeom
@@ -37,7 +38,13 @@ from .space_heatmap import build_space_voxel_json
 from .twin import TwinClient, build_twin_json
 from .twin_proxy import TwinProxy, load_twin_config
 from .usd import build_stage, elements_from_stage
-from .voxel import VoxelElement, build_voxel_json, build_voxel_stage, scene_origin
+from .voxel import (
+    VoxelElement,
+    build_voxel_json,
+    build_voxel_stage,
+    populate_voxel_cache,
+    scene_origin,
+)
 
 logger = logging.getLogger("ifc2usd")
 
@@ -123,10 +130,15 @@ def _add_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
         "-o", "--output", type=Path, default=None,
         help="Output base path without extension (default: output/<name>_voxels)",
     )
+    parser.add_argument(
+        "--profile", type=Path, default=None,
+        help="Write detailed voxelization phase timings as JSON",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
 
 
 def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    total_started = perf_counter()
     _configure_logging(args.verbose)
     if not args.input_path.is_file():
         parser.error(f"input file not found: {args.input_path}")
@@ -136,19 +148,29 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 
     output_base = args.output or _default_voxel_output(args.input_path)
     output_base.parent.mkdir(parents=True, exist_ok=True)
+    usd_open_seconds = 0.0
+    elements_from_stage_seconds = 0.0
 
     if suffix in _USD_EXTENSIONS:
         reference_path = args.input_path
+        phase_started = perf_counter()
         stage = Usd.Stage.Open(str(reference_path))
+        usd_open_seconds = perf_counter() - phase_started
+        phase_started = perf_counter()
         elements = elements_from_stage(stage)
+        elements_from_stage_seconds = perf_counter() - phase_started
     elif suffix == ".ifc":
         # PointInstancerレイヤー（.usda）は正本USDへの相対referenceを持つため、
         # 変換元USDはtempディレクトリではなく出力先の隣に永続化する
         # （tempに置くとreferenceが壊れたリンクになってしまう）。
         reference_path = output_base.parent / f"{args.input_path.stem}_structured.usdc"
         convert(args.input_path, reference_path)
+        phase_started = perf_counter()
         stage = Usd.Stage.Open(str(reference_path))
+        usd_open_seconds = perf_counter() - phase_started
+        phase_started = perf_counter()
         elements = elements_from_stage(stage)
+        elements_from_stage_seconds = perf_counter() - phase_started
     else:
         parser.error(f"unsupported input file type: {suffix or args.input_path}")
 
@@ -160,7 +182,15 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 
     # JSON と PointInstancer は同じ (要素, LOD) をボクセル化するので結果を共有する
     voxel_cache: dict = {}
+    occupancy_by_size: dict[str, float] = {}
+    if args.profile is not None:
+        origin = scene_origin(elements)
+        for size in dict.fromkeys(sizes):
+            phase_started = perf_counter()
+            populate_voxel_cache(elements, size, origin, args.fill, voxel_cache)
+            occupancy_by_size[str(size)] = perf_counter() - phase_started
 
+    phase_started = perf_counter()
     result = build_voxel_json(
         elements,
         sizes=sizes,
@@ -169,12 +199,16 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         fill=args.fill,
         cache=voxel_cache,
     )
+    json_build_seconds = perf_counter() - phase_started
     json_path = output_base.with_suffix(".json")
+    phase_started = perf_counter()
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_write_seconds = perf_counter() - phase_started
     logger.info("Wrote voxel JSON: %s", json_path)
 
     usda_path = output_base.with_suffix(".usda")
     reference_asset_path = os.path.relpath(reference_path, start=usda_path.parent)
+    phase_started = perf_counter()
     build_voxel_stage(
         elements,
         sizes=sizes,
@@ -184,7 +218,25 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         fill=args.fill,
         cache=voxel_cache,
     )
+    point_instancer_build_seconds = perf_counter() - phase_started
     logger.info("Wrote voxel PointInstancer layer: %s", usda_path)
+
+    if args.profile is not None:
+        profile = {
+            "version": 1,
+            "totalSeconds": perf_counter() - total_started,
+            "phases": {
+                "usdOpenSeconds": usd_open_seconds,
+                "elementsFromStageSeconds": elements_from_stage_seconds,
+                "occupancyBySizeSeconds": occupancy_by_size,
+                "jsonBuildSeconds": json_build_seconds,
+                "jsonWriteSeconds": json_write_seconds,
+                "pointInstancerBuildSeconds": point_instancer_build_seconds,
+            },
+        }
+        args.profile.parent.mkdir(parents=True, exist_ok=True)
+        args.profile.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+        logger.info("Wrote voxel profile: %s", args.profile)
     return 0
 
 

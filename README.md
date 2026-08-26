@@ -130,6 +130,7 @@ uv run python -m ifc2usd files/ToyodaLab.ifc  # モジュールとしても起�
 uv run ifc2usd voxelize output/model.usda --size 1.0 --size 0.5   # 変換済みUSDから（推奨）
 uv run ifc2usd voxelize files/ToyodaLab.ifc --size 0.5            # IFCから直接
 uv run ifc2usd voxelize output/model.usda --fill                  # 内部充填（既定は表面のみ）
+uv run ifc2usd voxelize output/model.usdc --size 1.0 --profile output/voxel-profile.json
 ```
 
 出力（`-o` はベース名。既定 `output/<name>_voxels`）:
@@ -142,6 +143,8 @@ uv run ifc2usd voxelize output/model.usda --fill                  # 内部充填
 
 内部充填（`--fill`）はボクセルグリッド上の外部flood-fillによる判定で、
 非多様体な実モデルでも安定して動く。
+`--profile` を指定すると、USD読込・要素抽出・LOD別占有計算・JSON・PointInstancerの
+工程別時間をJSONへ出力する。性能調査用で、ボクセル成果物の内容は変わらない。
 
 ### `export-gltf` — glTF(GLB)エクスポート
 
@@ -169,7 +172,8 @@ uv run ifc2usd benchmark files/kawasaki-model.ifc -o output/report \
 
 `<output>/metrics.json`、`<output>/comparison.md`、計測に使った `artifacts/` と
 `viewer/` を1コマンドで生成する。`cachePolicy` はCLI工程を `cold`、ブラウザを
-`cold-new-browser` と明記する。ボクセルサイズの既定は通常viewerと同じ0.5 m。
+`cold-new-browser`、RSS監視間隔を `rssSampleIntervalSeconds` として明記する。
+ボクセルサイズの既定は通常viewerと同じ0.5 m。
 同一マシン・同一viewportで比較すること。
 
 ### `serve` — Webビューワー
