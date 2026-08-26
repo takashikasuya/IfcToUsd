@@ -13,7 +13,7 @@ metadata stored as USD `customData` (GUID, class, name, latitude/longitude).
 
 ```bash
 uv sync                                   # create .venv and install deps (incl. dev group)
-uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.usda
+uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.usdc
 uv run ifc2usd <ifc> -o <out.usda> --y-up --verbose
 uv run python -m ifc2usd <ifc>            # equivalent module entry point
 uv run ifc2usd voxelize <usda|ifc> --size 1.0 --size 0.5   # -> <base>.json + <base>.usda

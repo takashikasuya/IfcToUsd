@@ -7,7 +7,7 @@
 
 ### 1.1 USD 出力（`ifc2usd`）
 
-- `output/<name>_structured.usda`。Z-UP・メートル単位。
+- 既定は `output/<name>_structured.usdc`（明示 `.usda` も対応）。Z-UP・メートル単位。
 - 階層: `/IFC_Model`(assembly) → `Site` → `Building` → `Storey_*` → `Space_*` / `Element_*` → `mesh`。
 - 各 prim に `customData`（GUID / class / Name / 緯度経度）、メッシュに UsdPreviewSurface
   マテリアルと displayColor。ToyodaLab 実測: Mesh 76・Material 21。

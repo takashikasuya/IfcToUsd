@@ -37,6 +37,13 @@ def test_explicit_convert_subcommand(tmp_path):
     assert out.is_file()
 
 
+def test_explicit_convert_subcommand_writes_usdc(tmp_path):
+    out = tmp_path / "explicit.usdc"
+    exit_code = main(["convert", str(FIXTURE), "-o", str(out)])
+    assert exit_code == 0
+    assert _open_stage(out).GetDefaultPrim().IsValid()
+
+
 def test_legacy_and_explicit_produce_equivalent_output(tmp_path):
     legacy_out = tmp_path / "legacy.usda"
     explicit_out = tmp_path / "explicit.usda"
@@ -94,7 +101,9 @@ def test_default_output_path_without_subcommand(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     exit_code = main([str(FIXTURE.resolve())])
     assert exit_code == 0
-    assert (tmp_path / "output" / "minimal_structured.usda").is_file()
+    output = tmp_path / "output" / "minimal_structured.usdc"
+    assert output.is_file()
+    assert _open_stage(output).GetDefaultPrim().IsValid()
 
 
 def test_serve_twin_config_missing_file_errors(tmp_path):

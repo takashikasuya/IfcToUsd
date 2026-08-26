@@ -70,14 +70,14 @@ def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
 
 
 def _default_output(ifc_path: Path) -> Path:
-    return Path("output") / f"{ifc_path.stem}_structured.usda"
+    return Path("output") / f"{ifc_path.stem}_structured.usdc"
 
 
 def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("ifc_path", type=Path, help="Path to the input .ifc file")
     parser.add_argument(
         "-o", "--output", type=Path, default=None,
-        help="Output .usd/.usda path (default: output/<name>_structured.usda)",
+        help="Output .usd/.usda/.usdc path (default: output/<name>_structured.usdc)",
     )
     parser.add_argument("--y-up", action="store_true", help="Use Y-UP axis instead of the IFC default Z-UP")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
@@ -144,7 +144,7 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         # PointInstancerレイヤー（.usda）は正本USDへの相対referenceを持つため、
         # 変換元USDはtempディレクトリではなく出力先の隣に永続化する
         # （tempに置くとreferenceが壊れたリンクになってしまう）。
-        reference_path = output_base.parent / f"{args.input_path.stem}_structured.usda"
+        reference_path = output_base.parent / f"{args.input_path.stem}_structured.usdc"
         convert(args.input_path, reference_path)
         stage = Usd.Stage.Open(str(reference_path))
         elements = elements_from_stage(stage)
