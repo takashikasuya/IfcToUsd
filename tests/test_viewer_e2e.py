@@ -312,16 +312,13 @@ def test_near_clip_plane_updates_when_zooming_in_close(page, served_url):
 def test_scene_load_failure_shows_visible_error_banner(browser, tmp_path):
     """scene.jsonの取得に失敗した場合、コンソールだけでなく画面上にも
     エラーが表示される。"""
-    import shutil
-
-    from ifc2usd.serve import make_server
+    from ifc2usd.serve import _copy_viewer_assets, make_server
 
     empty_dir = tmp_path / "empty_www"
     empty_dir.mkdir()
-    viewer_src = Path(__file__).parent.parent / "ifc2usd" / "viewer"
-    shutil.copy2(viewer_src / "index.html", empty_dir / "index.html")
-    shutil.copy2(viewer_src / "viewer.js", empty_dir / "viewer.js")
-    shutil.copytree(viewer_src / "vendor", empty_dir / "vendor")
+    # 資産のコピーはserve.py側と同じ実装を使う（新しいviewer/配下のモジュールが
+    # 増えたときにこのテストだけ取り残されないようにするため）
+    _copy_viewer_assets(empty_dir)
     # scene.json をわざと配置しない
 
     server = make_server(empty_dir, port=0)

@@ -3,10 +3,11 @@ name = "ifc2usd"
 version = "0.2.0"
 description = "Convert IFC (building BIM) models into a structured OpenUSD stage"
 readme = "README.md"
-requires-python = ">=3.10"
+# OpenUSD 26.08 で Python 3.9/3.10 が非推奨化したため 3.11 を下限とする
+requires-python = ">=3.11"
 dependencies = [
     "ifcopenshell>=0.8",
-    "usd-core>=25.5",
+    "usd-core>=26.5",
     "numpy>=1.24",
     "tqdm>=4.0",
     "trimesh>=4.0",

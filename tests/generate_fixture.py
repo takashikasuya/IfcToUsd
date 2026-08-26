@@ -54,12 +54,15 @@ def _add_wall(model, body, storey, builder, name, origin, size, colour):
     return wall
 
 
-def build() -> ifcopenshell.file:
+def build(millimetres: bool = False) -> ifcopenshell.file:
+    """フィクスチャを組み立てる。``millimetres`` で同じ形状を mm 記述で出力する。"""
     model = ifcopenshell.api.project.create_file(version="IFC4")
 
     project = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="Fixture Project")
     # 既定は mm。寸法を m 単位で扱えるよう SI メートルを明示する
-    metre = ifcopenshell.api.unit.add_si_unit(model, unit_type="LENGTHUNIT")
+    metre = ifcopenshell.api.unit.add_si_unit(
+        model, unit_type="LENGTHUNIT", prefix="MILLI" if millimetres else None
+    )
     ifcopenshell.api.unit.assign_unit(model, units=[metre])
 
     context = ifcopenshell.api.context.add_context(model, context_type="Model")
@@ -76,8 +79,15 @@ def build() -> ifcopenshell.file:
     ifcopenshell.api.aggregate.assign_object(model, products=[storey], relating_object=building)
 
     builder = ifcopenshell.util.shape_builder.ShapeBuilder(model)
-    _add_wall(model, body, storey, builder, "Wall North", (0.0, 0.0, 0.0), (5.0, 0.2, 3.0), (0.8, 0.2, 0.2))
-    _add_wall(model, body, storey, builder, "Wall East", (5.0, 0.0, 0.0), (0.2, 4.0, 3.0), (0.2, 0.5, 0.8))
+    s = 1000.0 if millimetres else 1.0
+    _add_wall(
+        model, body, storey, builder, "Wall North",
+        (0.0, 0.0, 0.0), (5.0 * s, 0.2 * s, 3.0 * s), (0.8, 0.2, 0.2),
+    )
+    _add_wall(
+        model, body, storey, builder, "Wall East",
+        (5.0 * s, 0.0, 0.0), (0.2 * s, 4.0 * s, 3.0 * s), (0.2, 0.5, 0.8),
+    )
 
     return model
 

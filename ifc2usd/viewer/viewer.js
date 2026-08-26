@@ -6,6 +6,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
+import { TURBO_GRADIENT_CSS, TURBO_LUT, turboColor as _turboColor } from "./lib/colormap.js";
+import { decodeMortonIndices, mortonDecode } from "./lib/morton.js";
+
 const viewport = document.getElementById("viewport");
 const treePanel = document.getElementById("tree-panel");
 const treeNodesContainer = document.getElementById("tree-nodes");
@@ -798,44 +801,8 @@ async function loadSdfSlices(sdfUrl) {
 }
 
 // --- Live: ビルOS連携デジタルツイン表示 (E9-4, digital-twin-spec.md §5.1-§5.3) ---
-
-// turbo系カラーマップの多項式近似 (Anton Mikhailov / Google Research, 2019, Apache-2.0
-// "Turbo, An Improved Rainbow Colormap for Visualization"を移植)。外部ファイル・
-// CDN依存なしで256エントリのLUTを事前計算する（build_twin_json()のcolormap名
-// "turbo"に対応する唯一の実装、E9-4の受け入れ条件）。
-function _turboColor(x) {
-  x = Math.min(1, Math.max(0, x));
-  const x2 = x * x;
-  const x3 = x2 * x;
-  const x4 = x2 * x2;
-  const x5 = x3 * x2;
-  const r =
-    0.13572138 + 4.6153926 * x - 42.66032258 * x2 + 132.13108234 * x3 - 152.94239396 * x4 + 59.28637943 * x5;
-  const g =
-    0.09140261 + 2.19418839 * x + 4.84296658 * x2 - 14.18503333 * x3 + 4.27729857 * x4 + 2.82956604 * x5;
-  const b =
-    0.1066733 + 12.64194608 * x - 60.58204836 * x2 + 110.36276771 * x3 - 89.90310912 * x4 + 27.34824973 * x5;
-  return [Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b))];
-}
-
-const TURBO_LUT = Array.from({ length: 256 }, (_, i) => _turboColor(i / 255));
-
-// 凡例のグラデーションバーはCSS linear-gradientで描く（<canvas>にしない）。
-// <canvas>にすると、既存の全PlaywrightテストがWebGL描画結果の画素検証に使う
-// `document.querySelector('#viewport canvas')`（唯一のcanvas要素という前提）が、
-// レンダラーのcanvas(viewport.appendChild(renderer.domElement)でJS実行時に
-// 追加され、DOM順で常にこの凡例より後になる)より先にこちらへマッチしてしまい、
-// 3D描画ではなく凡例バーの画素を検証してしまう（実際に踏んだ回帰）。
-const TURBO_GRADIENT_CSS = (() => {
-  const stops = 16;
-  const parts = [];
-  for (let i = 0; i <= stops; i++) {
-    const t = i / stops;
-    const [r, g, b] = TURBO_LUT[Math.round(t * 255)];
-    parts.push(`rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}) ${Math.round(t * 100)}%`);
-  }
-  return `linear-gradient(to right, ${parts.join(", ")})`;
-})();
+// turbo カラーマップ本体と凡例グラデーションは ./lib/colormap.js（純関数、
+// node --test で直接検証している）。
 
 // twin.json（build_twin_json()の出力）。scene.jsonにassets.twinが無ければnullの
 // まま（SDFスライスと同じ付加的アセット規約）。
@@ -1332,66 +1299,10 @@ const voxelRoot = new THREE.Group();
 modelRoot.add(voxelRoot);
 const voxelLods = [];
 
-// JSのシフト演算子(<<, >>)はシフト量を32で割った余りとして扱うため、シフト量が
-// 32以上になると0を返さずラップアラウンドしてしまう（コード自体が32bitに収まる
-// かどうかとは別の制約）。ループは `code >> (3*i)` が0になるまで回るため、コードの
-// 最上位ビット位置Lに対し最終的に評価するシフト量は 3*ceil(L/3) になる。これが
-// 31以下に収まる最大のLは30（ceil(30/3)*3=30）なので、閾値は2^30-1に取る
-// （2^31-1まで許すと31bit境界でシフト量が33になりラップアラウンドして壊れる）。
-const _MORTON_FAST_PATH_MAX_CODE = 0x3fffffff;
-
-function mortonDecode(code) {
-  if (code <= _MORTON_FAST_PATH_MAX_CODE) {
-    // 大半のコード(10bit/軸強まで)は普通のNumberでのビット演算で十分正確かつ高速。
-    let x = 0;
-    let y = 0;
-    let z = 0;
-    let i = 0;
-    while (code >> (3 * i) > 0) {
-      x |= ((code >> (3 * i)) & 1) << i;
-      y |= ((code >> (3 * i + 1)) & 1) << i;
-      z |= ((code >> (3 * i + 2)) & 1) << i;
-      i += 1;
-    }
-    return [x, y, z];
-  }
-
-  // spec.md §2は3軸21bitまで(=最大63bit)のMortonコードを許容するが、JSのビット
-  // 演算子(<<, |, &)は32bit符号付き整数に丸められ、それを超えるビットが破壊される。
-  // ifc2usd/voxel.py の morton_decode と同じアルゴリズムをBigIntで実装し直すことで、
-  // 63bit全域を精度劣化・破壊なく復元できるようにする（上のfast pathを超えた
-  // まれなケースのみ、より遅いBigIntを使う）。
-  let c = BigInt(code);
-  let x = 0n;
-  let y = 0n;
-  let z = 0n;
-  let i = 0n;
-  while (c >> (3n * i) > 0n) {
-    x |= ((c >> (3n * i)) & 1n) << i;
-    y |= ((c >> (3n * i + 1n)) & 1n) << i;
-    z |= ((c >> (3n * i + 2n)) & 1n) << i;
-    i += 1n;
-  }
-  return [Number(x), Number(y), Number(z)];
-}
+// Morton デコードと voxels.json v3 の delta+RLE 展開は ./lib/morton.js
+// （純関数、node --test で 32bit シフトの境界まで直接検証している）。
 
 const _voxelUnitBox = new THREE.BoxGeometry(1, 1, 1);
-
-// voxels.json v3の`indices`はdelta+RLE符号化された{base, deltas}形式（Issue #38 /
-// E7-4、ifc2usd.voxel.encode_morton_indicesと対）。素朴な配列（v2互換ファイルや
-// convertV1VoxelJsonの出力）はそのまま返し、両形式を透過的に扱う。
-function decodeMortonIndices(indices) {
-  if (Array.isArray(indices)) return indices;
-  const codes = [];
-  if (indices.base === null || indices.base === undefined) return codes;
-  codes.push(indices.base);
-  for (const [delta, count] of indices.deltas ?? []) {
-    for (let i = 0; i < count; i++) {
-      codes.push(codes[codes.length - 1] + delta);
-    }
-  }
-  return codes;
-}
 
 function buildVoxelLods(voxelDescription) {
   const origin = voxelDescription.origin;

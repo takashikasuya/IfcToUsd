@@ -76,6 +76,9 @@ def _click_center_of(page, guid):
             window.ifc2usdViewer.fitCameraToBox(box, {{ paddingFactor: 1.5 }});
         }}
     """)
+    page.evaluate(
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
     viewport_box = page.locator("#viewport").bounding_box()
     cx = viewport_box["x"] + viewport_box["width"] / 2
     cy = viewport_box["y"] + viewport_box["height"] / 2

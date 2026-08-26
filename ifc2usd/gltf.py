@@ -13,7 +13,7 @@ import numpy as np
 import trimesh
 from pxr import Usd, UsdGeom, UsdShade
 
-from .usd import MESH_PRIM_NAME
+from .usd import MESH_PRIM_NAME, PBR_SHADER_NAME
 
 _DEFAULT_COLOR = (0.5, 0.5, 0.5)
 # usd.py の create_materials が実際に設定する既定値と揃える（非金属・完全拡散反射）。
@@ -52,6 +52,23 @@ def _mesh_display_color(mesh: UsdGeom.Mesh) -> tuple[float, float, float]:
     return _DEFAULT_COLOR
 
 
+def _surface_shader(stage: Usd.Stage, mat_path):
+    """マテリアルの surface 出力をたどってシェーダを得る。
+
+    他ツールが書いた USD ではシェーダ prim 名が ifc2usd の規約と違うため、
+    名前決め打ちではなく接続から解決し、たどれなければ規約名へフォールバックする。
+    """
+    material = UsdShade.Material(stage.GetPrimAtPath(mat_path))
+    if material:
+        source = material.ComputeSurfaceSource()
+        shader = source[0] if isinstance(source, tuple) else source
+        if shader:
+            return shader
+
+    prim = stage.GetPrimAtPath(mat_path.AppendChild(PBR_SHADER_NAME))
+    return UsdShade.Shader(prim) if prim.IsValid() else None
+
+
 def _mesh_material_properties(
     mesh: UsdGeom.Mesh, stage: Usd.Stage
 ) -> tuple[float, float, float, float, float, float]:
@@ -68,12 +85,13 @@ def _mesh_material_properties(
     バグ）。
     """
     mat_path = UsdShade.MaterialBindingAPI(mesh).GetDirectBinding().GetMaterialPath()
-    if not mat_path:
+    shader = _surface_shader(stage, mat_path) if mat_path else None
+    if shader is None:
         r, g, b = _mesh_display_color(mesh)
         return (r, g, b, 1.0, _DEFAULT_METALLIC, _DEFAULT_ROUGHNESS)
 
-    shader = UsdShade.Shader(stage.GetPrimAtPath(mat_path.AppendChild("PBRShader")))
-    diffuse = shader.GetInput("diffuseColor").Get()
+    diffuse_input = shader.GetInput("diffuseColor")
+    diffuse = diffuse_input.Get() if diffuse_input else None
     if diffuse is None:
         r, g, b = _mesh_display_color(mesh)
     else:
