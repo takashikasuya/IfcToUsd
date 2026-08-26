@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from ifc2usd import convert
+from ifc2usd.cli import main
 from ifc2usd.serve import build_serve_directory, make_server
 from ifc2usd.twin import TwinClient
 from ifc2usd.twin_proxy import TwinProxy
@@ -42,6 +43,19 @@ def test_build_serve_directory_produces_scene_json_and_glb(usda, tmp_path):
 
     glb_name = scene["assets"]["gltf"]
     assert (workdir / glb_name).is_file()
+
+
+def test_build_serve_directory_accepts_default_usdc(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert main([str(FIXTURE.resolve())]) == 0
+
+    usdc = tmp_path / "output" / "minimal_structured.usdc"
+    workdir = tmp_path / "www-usdc"
+    workdir.mkdir()
+    build_serve_directory(usdc, workdir)
+
+    scene = json.loads((workdir / "scene.json").read_text(encoding="utf-8"))
+    assert (workdir / scene["assets"]["gltf"]).is_file()
 
 
 def test_build_serve_directory_produces_voxels_json(usda, tmp_path):

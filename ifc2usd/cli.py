@@ -6,10 +6,10 @@
 
 例:
     uv run ifc2usd files/ToyodaLab.ifc
-    uv run ifc2usd convert files/ToyodaLab.ifc -o output/model.usda --y-up --verbose
-    uv run ifc2usd voxelize output/model.usda --size 0.5
-    uv run ifc2usd export-gltf output/model.usda
-    uv run ifc2usd serve output/model.usda
+    uv run ifc2usd convert files/ToyodaLab.ifc -o output/model.usdc --y-up --verbose
+    uv run ifc2usd voxelize output/model.usdc --size 0.5
+    uv run ifc2usd export-gltf output/model.usdc
+    uv run ifc2usd serve output/model.usdc
 """
 
 from __future__ import annotations
@@ -109,7 +109,8 @@ def _default_voxel_output(input_path: Path) -> Path:
 
 def _add_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "input_path", type=Path, help="Path to a converted .usda/.usd (recommended) or a source .ifc file"
+        "input_path", type=Path,
+        help="Path to a converted .usd/.usda/.usdc (recommended) or a source .ifc file",
     )
     parser.add_argument(
         "--size", type=float, action="append", dest="sizes",
@@ -196,7 +197,7 @@ def _add_space_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reference", type=Path, required=True,
         help=(
-            "Path to the converted .usda/.usd for this IFC (used only to derive the shared "
+            "Path to the converted .usd/.usda/.usdc for this IFC (used only to derive the shared "
             "voxel origin/up-axis that voxels.json already uses; never modified)"
         ),
     )
