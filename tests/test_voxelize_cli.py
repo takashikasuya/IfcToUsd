@@ -58,7 +58,7 @@ def test_voxelize_also_writes_pointinstancer_usda(tmp_path):
 
 
 def test_voxelize_from_ifc_directly_also_writes_pointinstancer_usda(tmp_path):
-    """IFC直接入力でも、変換した正本USDへのreferenceを持つ.usdaが書ける
+    """IFC直接入力でも、変換した正本USDCへのreferenceを持つ.usdaが書ける
     （正本を一時ディレクトリに置くとreferenceが壊れるため、永続化して確認する）。"""
     from pxr import UsdGeom
 
@@ -68,6 +68,10 @@ def test_voxelize_from_ifc_directly_also_writes_pointinstancer_usda(tmp_path):
 
     voxel_usda_path = out_base.with_suffix(".usda")
     assert voxel_usda_path.is_file()
+    assert (tmp_path / "minimal_structured.usdc").is_file()
+
+    data = json.loads(out_base.with_suffix(".json").read_text())
+    assert data["source"]["usd"] == "minimal_structured.usdc"
 
     stage = Usd.Stage.Open(str(voxel_usda_path))
     assert stage.GetPrimAtPath("/IFC_Model/Site").IsValid()

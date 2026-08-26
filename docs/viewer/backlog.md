@@ -165,7 +165,8 @@ flowchart LR
 
 `files/kawasaki-model.ifc`（IFC2X3、192 MB、3 Site / 3 Building / 21 Storey、
 7,267メッシュ）を E10 実装後に変換・表示して得た実測に基づくフォローアップ。
-詳細な計測値とキャプチャは `output/report/index.html` にある。
+要件・品質ゲート・TDD/PRワークフローは `docs/viewer/e11-prd.md`、詳細な計測値と
+キャプチャは `output/report/index.html` にある。
 
 ### 実測ベースライン（2026-08-26）
 

@@ -13,14 +13,14 @@ metadata stored as USD `customData` (GUID, class, name, latitude/longitude).
 
 ```bash
 uv sync                                   # create .venv and install deps (incl. dev group)
-uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.usda
+uv run ifc2usd files/ToyodaLab.ifc        # convert -> output/<name>_structured.usdc
 uv run ifc2usd <ifc> -o <out.usda> --y-up --verbose
 uv run python -m ifc2usd <ifc>            # equivalent module entry point
-uv run ifc2usd voxelize <usda|ifc> --size 1.0 --size 0.5   # -> <base>.json + <base>.usda
-uv run ifc2usd export-gltf <usda> -o <out.glb>
-uv run ifc2usd space-voxelize <ifc> --reference <usda> --size 0.5 -o <out.json>  # E9-5 space heatmap prerequisite
-uv run ifc2usd serve <usda>                                # local web viewer, http://127.0.0.1:8000
-uv run ifc2usd serve <usda> --twin twin-config.json --space-voxels <out.json>    # E9-3/E9-5 digital twin mode
+uv run ifc2usd voxelize <usdc|ifc> --size 1.0 --size 0.5   # -> <base>.json + <base>.usda
+uv run ifc2usd export-gltf <usdc> -o <out.glb>
+uv run ifc2usd space-voxelize <ifc> --reference <usdc> --size 0.5 -o <out.json>  # E9-5 space heatmap prerequisite
+uv run ifc2usd serve <usdc>                                # local web viewer, http://127.0.0.1:8000
+uv run ifc2usd serve <usdc> --twin twin-config.json --space-voxels <out.json>    # E9-3/E9-5 digital twin mode
 uv run pytest                             # run the end-to-end conversion tests
 uv run python tests/generate_fixture.py   # regenerate tests/fixtures/minimal.ifc
 ```

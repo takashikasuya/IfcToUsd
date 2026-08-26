@@ -6,10 +6,10 @@
 
 例:
     uv run ifc2usd files/ToyodaLab.ifc
-    uv run ifc2usd convert files/ToyodaLab.ifc -o output/model.usda --y-up --verbose
-    uv run ifc2usd voxelize output/model.usda --size 0.5
-    uv run ifc2usd export-gltf output/model.usda
-    uv run ifc2usd serve output/model.usda
+    uv run ifc2usd convert files/ToyodaLab.ifc -o output/model.usdc --y-up --verbose
+    uv run ifc2usd voxelize output/model.usdc --size 0.5
+    uv run ifc2usd export-gltf output/model.usdc
+    uv run ifc2usd serve output/model.usdc
 """
 
 from __future__ import annotations
@@ -70,14 +70,14 @@ def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
 
 
 def _default_output(ifc_path: Path) -> Path:
-    return Path("output") / f"{ifc_path.stem}_structured.usda"
+    return Path("output") / f"{ifc_path.stem}_structured.usdc"
 
 
 def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("ifc_path", type=Path, help="Path to the input .ifc file")
     parser.add_argument(
         "-o", "--output", type=Path, default=None,
-        help="Output .usd/.usda path (default: output/<name>_structured.usda)",
+        help="Output .usd/.usda/.usdc path (default: output/<name>_structured.usdc)",
     )
     parser.add_argument("--y-up", action="store_true", help="Use Y-UP axis instead of the IFC default Z-UP")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
@@ -109,7 +109,8 @@ def _default_voxel_output(input_path: Path) -> Path:
 
 def _add_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "input_path", type=Path, help="Path to a converted .usda/.usd (recommended) or a source .ifc file"
+        "input_path", type=Path,
+        help="Path to a converted .usd/.usda/.usdc (recommended) or a source .ifc file",
     )
     parser.add_argument(
         "--size", type=float, action="append", dest="sizes",
@@ -144,7 +145,7 @@ def _run_voxelize(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         # PointInstancerレイヤー（.usda）は正本USDへの相対referenceを持つため、
         # 変換元USDはtempディレクトリではなく出力先の隣に永続化する
         # （tempに置くとreferenceが壊れたリンクになってしまう）。
-        reference_path = output_base.parent / f"{args.input_path.stem}_structured.usda"
+        reference_path = output_base.parent / f"{args.input_path.stem}_structured.usdc"
         convert(args.input_path, reference_path)
         stage = Usd.Stage.Open(str(reference_path))
         elements = elements_from_stage(stage)
@@ -196,7 +197,7 @@ def _add_space_voxelize_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reference", type=Path, required=True,
         help=(
-            "Path to the converted .usda/.usd for this IFC (used only to derive the shared "
+            "Path to the converted .usd/.usda/.usdc for this IFC (used only to derive the shared "
             "voxel origin/up-axis that voxels.json already uses; never modified)"
         ),
     )

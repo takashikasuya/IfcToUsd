@@ -48,11 +48,11 @@ IFCの空間階層（Site → Building → Storey → Space / Element → Object
 # 依存関係のインストール（.venv を自動作成）
 uv sync
 
-# IFC→USD変換（既定で output/<name>_structured.usda を出力）
+# IFC→USD変換（既定で高速・省容量な output/<name>_structured.usdc を出力）
 uv run ifc2usd files/ToyodaLab.ifc
 
 # 変換結果をブラウザで閲覧
-uv run ifc2usd serve output/ToyodaLab_structured.usda
+uv run ifc2usd serve output/ToyodaLab_structured.usdc
 # → http://127.0.0.1:8000 が開く
 ```
 
@@ -117,7 +117,7 @@ uv run python -m ifc2usd files/ToyodaLab.ifc  # モジュールとしても起�
 | 引数 | 説明 |
 | --- | --- |
 | `ifc_path` | 入力する `.ifc` ファイル（必須） |
-| `-o, --output` | 出力する `.usd` / `.usda` パス（既定: `output/<name>_structured.usda`） |
+| `-o, --output` | 出力する `.usd` / `.usda` / `.usdc` パス（既定: `output/<name>_structured.usdc`、明示 `.usda` も可） |
 | `--y-up` | Y-UP軸で出力（既定はIFC標準のZ-UP） |
 | `-v, --verbose` | 詳細ログを出力 |
 
