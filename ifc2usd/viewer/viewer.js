@@ -2121,6 +2121,7 @@ async function loadScene() {
   buildNodesByGuid(sceneDescription.tree);
   _buildStoreyDescendantIndex(sceneDescription.tree);
   renderTree(sceneDescription.tree);
+  window.ifc2usdMeshLoaded = true;
 
   if (sceneDescription.assets.voxels) {
     // ボクセルはメッシュ表示にとって付加的な情報（サーバー側もvoxels.jsonが

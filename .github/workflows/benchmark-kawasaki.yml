@@ -1,0 +1,53 @@
+name: Kawasaki performance benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Optional metrics.json path retained on the self-hosted runner
+        required: false
+        type: string
+
+jobs:
+  benchmark:
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Chromium
+        run: uv run playwright install chromium
+
+      - name: Verify local large-model input
+        shell: pwsh
+        run: |
+          if (-not (Test-Path files/kawasaki-model.ifc)) {
+            throw "Place ignored files/kawasaki-model.ifc on the self-hosted runner before dispatching."
+          }
+
+      - name: Run benchmark without baseline
+        if: inputs.baseline == ''
+        run: uv run ifc2usd benchmark files/kawasaki-model.ifc -o output/kawasaki-benchmark --size 2.0 --size 1.0
+
+      - name: Run benchmark with baseline
+        if: inputs.baseline != ''
+        shell: pwsh
+        env:
+          BASELINE_PATH: ${{ inputs.baseline }}
+        run: uv run ifc2usd benchmark files/kawasaki-model.ifc -o output/kawasaki-benchmark --size 2.0 --size 1.0 --baseline "$env:BASELINE_PATH"
+
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: kawasaki-performance-${{ github.sha }}
+          path: output/kawasaki-benchmark/
+          retention-days: 30
