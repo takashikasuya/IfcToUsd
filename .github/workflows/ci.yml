@@ -23,3 +23,13 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -q
+
+      - name: Run fixture performance benchmark
+        run: uv run ifc2usd benchmark tests/fixtures/minimal.ifc -o output/ci-benchmark
+
+      - name: Upload fixture performance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-performance-${{ github.sha }}
+          path: output/ci-benchmark/
+          retention-days: 14

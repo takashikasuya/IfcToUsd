@@ -197,6 +197,10 @@ flowchart LR
 | E11-7 | フェデレーション分割: Site / Building単位のGLBチャンク生成・選択ロード（E6-1の空間3D Tilesとは別軸） | P2 | L | [#76](https://github.com/takashikasuya/IfcToUsd/issues/76) | scene.jsonがチャンクとGUID範囲を記述。1分野だけロード可能で、3分野ロード時は現行と同じ見た目・選択結果 |
 | E11-8 | クリック選択E2Eの間欠失敗（Wall Northをfit後にWall Eastが選ばれる）を再現・修正 | P1 | S | [#77](https://github.com/takashikasuya/IfcToUsd/issues/77) | 対象テスト100回連続成功。固定sleep禁止。OrbitControls damping / raycast時点のカメラ状態を計測して原因を特定 |
 
+E11-2は実装済み（`ifc2usd benchmark`、Issue #71）。各CLI工程を新規プロセス、
+Web計測を新規Chromiumで実行し、`metrics.json`と`comparison.md`を生成する。
+軽量fixtureはCI、大規模kawasakiモデルはself-hostedの手動workflowで計測する。
+
 ### 既存バックログとの境界
 
 - **E10-6 / Issue #63**: IFC変換時間、ピークメモリ、flood-fill、ボクセル化のCPU性能は

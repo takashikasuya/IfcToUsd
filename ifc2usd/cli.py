@@ -1,6 +1,6 @@
 """IFC → USD 変換の CLI エントリポイント。
 
-サブコマンド構成: ``convert`` / ``voxelize`` / ``export-gltf`` / ``serve``。
+サブコマンド構成: ``convert`` / ``voxelize`` / ``export-gltf`` / ``benchmark`` / ``serve``。
 後方互換のため、サブコマンド名を省略した旧来の呼び出し
 (``ifc2usd <ifc> ...``) は ``convert`` として扱う。
 
@@ -31,6 +31,7 @@ from . import __version__
 from .gltf import export_gltf
 from .ifc import GeometryData, create_settings, get_geometry, get_space_geometry
 from .mapping import MappingValidationError
+from .performance import run_benchmark
 from .serve import build_serve_directory, make_server
 from .space_heatmap import build_space_voxel_json
 from .twin import TwinClient, build_twin_json
@@ -289,6 +290,54 @@ def _run_export_gltf(args: argparse.Namespace, parser: argparse.ArgumentParser) 
     return 0
 
 
+def _add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("ifc_path", type=Path, help="Path to the input .ifc file")
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("output") / "report",
+        help="Report directory (default: output/report)",
+    )
+    parser.add_argument(
+        "--size",
+        type=float,
+        action="append",
+        dest="sizes",
+        help="Voxel size in meters (repeatable; default: 0.5)",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Previous metrics.json used to calculate comparison deltas",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+
+def _run_benchmark(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _configure_logging(args.verbose)
+    if not args.ifc_path.is_file():
+        parser.error(f"IFC file not found: {args.ifc_path}")
+    if args.baseline is not None and not args.baseline.is_file():
+        parser.error(f"baseline metrics file not found: {args.baseline}")
+    sizes = tuple(args.sizes or [0.5])
+    if any(size <= 0 for size in sizes):
+        parser.error("voxel sizes must be positive")
+
+    try:
+        run_benchmark(
+            args.ifc_path,
+            args.output,
+            voxel_sizes=sizes,
+            baseline_path=args.baseline,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(f"benchmark failed: {exc}")
+    logger.info("Wrote performance report: %s", args.output)
+    return 0
+
+
 def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("usd_path", type=Path, help="Path to a converted .usda/.usd/.usdc file")
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on (default: 8000)")
@@ -412,6 +461,11 @@ _COMMANDS: dict[str, tuple] = {
         _add_space_voxelize_arguments,
         _run_space_voxelize,
         "Voxelize IfcSpace geometry (E9-5 space/voxel heatmap prerequisite) into occupancy voxel JSON.",
+    ),
+    "benchmark": (
+        _add_benchmark_arguments,
+        _run_benchmark,
+        "Measure cold conversion, artifacts, and viewer performance into a versioned report.",
     ),
     "serve": (
         _add_serve_arguments,

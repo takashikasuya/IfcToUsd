@@ -151,6 +151,27 @@ uv run ifc2usd export-gltf output/model.usda -o output/model.glb
 
 各ノードの `extras` にGUID/class/nameを書き出すため、glTF側でもIFC要素との対応が追える。
 
+### `benchmark` — 性能計測
+
+変換・USD cold open・GLB出力・ボクセル化をそれぞれ新規プロセスで測り、
+新規Chromiumプロセスで初回メッシュ表示、全アセット完了、draw calls、
+フレーム時間p50/p95を測る。各工程の時間とピークRSS、成果物サイズを
+バージョン付きJSONへまとめる。
+
+```bash
+# CI向け軽量fixture
+uv run ifc2usd benchmark tests/fixtures/minimal.ifc -o output/report
+
+# kawasaki手動・夜間計測。前回値との差分もcomparison.mdへ出力
+uv run ifc2usd benchmark files/kawasaki-model.ifc -o output/report \
+  --size 2.0 --size 1.0 --baseline output/baseline/metrics.json
+```
+
+`<output>/metrics.json`、`<output>/comparison.md`、計測に使った `artifacts/` と
+`viewer/` を1コマンドで生成する。`cachePolicy` はCLI工程を `cold`、ブラウザを
+`cold-new-browser` と明記する。ボクセルサイズの既定は通常viewerと同じ0.5 m。
+同一マシン・同一viewportで比較すること。
+
 ### `serve` — Webビューワー
 
 変換済みUSDを、ブラウザで動くthree.jsベースのローカルWebビューワーとして配信する。
