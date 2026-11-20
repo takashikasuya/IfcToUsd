@@ -119,7 +119,20 @@ uv run python -m ifc2usd files/ToyodaLab.ifc  # モジュールとしても起�
 | `ifc_path` | 入力する `.ifc` ファイル（必須） |
 | `-o, --output` | 出力する `.usd` / `.usda` / `.usdc` パス（既定: `output/<name>_structured.usdc`、明示 `.usda` も可） |
 | `--y-up` | Y-UP軸で出力（既定はIFC標準のZ-UP） |
+| `--storey GLOBALID` | その IfcBuildingStorey に置かれた要素（下の IfcSpace に置かれた要素を含む）だけを出力 |
+| `--global-ids FILE` | FILE に列挙した要素（1 行 1 GlobalId。空行と `#` で始まる行は無視）とその集約の部品だけを出力 |
 | `-v, --verbose` | 詳細ログを出力 |
+
+`--storey` と `--global-ids` は同時に指定できない。どちらも空間の階層（Site・Building・Storey）は保ち、
+範囲外の要素の prim を出さない。部品だけを選んだ集約の親は空のグループとして残る。範囲はルートの
+customData `ifcScope`（`{"storey": ...}` または `{"globalIds": [...]}`）に記録され、`export-gltf` などの
+後段は範囲を絞った USD をそのまま入力にする。見つからない GlobalId、階でない `--storey`、空間要素を
+含む `--global-ids` は終了コード 2。
+
+```bash
+uv run ifc2usd convert files/ToyodaLab.ifc -o output/2f.usdc --storey 2O2Fr$t4X7Zf8NOew3FLOH
+uv run ifc2usd convert files/ToyodaLab.ifc -o output/selected.usdc --global-ids selected.txt
+```
 
 ### `voxelize` — ボクセル化
 
