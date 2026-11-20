@@ -3,5 +3,6 @@
 __version__ = "0.2.0"
 
 from .cli import convert
+from .scope import ConvertScope
 
-__all__ = ["convert"]
+__all__ = ["ConvertScope", "convert"]

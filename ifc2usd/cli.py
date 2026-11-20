@@ -37,6 +37,7 @@ from .serve import build_serve_directory, make_server
 from .space_heatmap import build_space_voxel_json
 from .twin import TwinClient, build_twin_json
 from .twin_proxy import TwinProxy, load_twin_config
+from .scope import ConvertScope, resolve_scope
 from .usd import build_stage, elements_from_stage
 from .voxel import (
     VoxelElement,
@@ -51,17 +52,26 @@ logger = logging.getLogger("ifc2usd")
 _USD_EXTENSIONS = (".usd", ".usda", ".usdc")
 
 
-def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
-    """IFC ファイルを構造化された USD ステージへ変換して書き出す。"""
+def convert(
+    ifc_path: Path, output_path: Path, y_up: bool = False, scope: ConvertScope | None = None
+) -> Path:
+    """IFC ファイルを構造化された USD ステージへ変換して書き出す。
+
+    ``scope`` を渡すと、その階・要素だけを出力する（空間の階層は保つ。``ifc2usd.scope``）。
+    見つからない GlobalId などの不正な範囲は ValueError。
+    """
     logger.info("Opening IFC: %s", ifc_path)
     ifc_file = ifcopenshell.open(str(ifc_path))
+    scope_ids = resolve_scope(ifc_file, scope) if scope is not None else None
+    if scope_ids is not None:
+        logger.info("Scope %s: %d elements", scope.record(), len(scope_ids))
 
     settings = create_settings()
 
     geometries: dict = {}
     materials: dict = {}
     for verts, indices, norms, info, material, color, translate in tqdm(
-        get_geometry(settings, ifc_file, materials), desc="Reading geometry"
+        get_geometry(settings, ifc_file, materials, scope_ids), desc="Reading geometry"
     ):
         faces = [3] * (len(indices) // 3)
         geometries[info["GlobalId"]] = GeometryData(
@@ -71,7 +81,15 @@ def convert(ifc_path: Path, output_path: Path, y_up: bool = False) -> Path:
     logger.info("Extracted %d geometries, %d materials", len(geometries), len(materials))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    build_stage(ifc_file, geometries, materials, str(output_path), y_up=y_up)
+    build_stage(
+        ifc_file,
+        geometries,
+        materials,
+        str(output_path),
+        y_up=y_up,
+        scope_ids=scope_ids,
+        scope_record=scope.record() if scope is not None else None,
+    )
     logger.info("Wrote USD: %s", output_path)
     return output_path
 
@@ -87,7 +105,31 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Output .usd/.usda/.usdc path (default: output/<name>_structured.usdc)",
     )
     parser.add_argument("--y-up", action="store_true", help="Use Y-UP axis instead of the IFC default Z-UP")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--storey", metavar="GLOBALID",
+        help="Only output elements in this IfcBuildingStorey (and the spaces under it); "
+        "the spatial hierarchy is kept",
+    )
+    scope.add_argument(
+        "--global-ids", type=Path, metavar="FILE",
+        help="Only output the elements listed in FILE (one GlobalId per line; blank lines and "
+        "lines starting with # are ignored) and their aggregated parts",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+
+def _read_global_ids(path: Path, parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    if not path.is_file():
+        parser.error(f"GlobalId list not found: {path}")
+    ids = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            ids.append(line)
+    if not ids:
+        parser.error(f"GlobalId list is empty: {path}")
+    return tuple(ids)
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -105,8 +147,18 @@ def _run_convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
     if not args.ifc_path.is_file():
         parser.error(f"IFC file not found: {args.ifc_path}")
 
+    scope = None
+    if args.storey is not None:
+        scope = ConvertScope(storey=args.storey)
+    elif args.global_ids is not None:
+        scope = ConvertScope(global_ids=_read_global_ids(args.global_ids, parser))
+
     output_path = args.output or _default_output(args.ifc_path)
-    convert(args.ifc_path, output_path, y_up=args.y_up)
+    try:
+        convert(args.ifc_path, output_path, y_up=args.y_up, scope=scope)
+    except ValueError as exc:
+        # 範囲の誤り（見つからない GlobalId など）は使い方の誤りとして終了コード 2
+        parser.error(str(exc))
     return 0
 
 

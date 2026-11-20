@@ -146,8 +146,21 @@ def append_prim(stage, props: dict, path: str, geometries: dict, material_prims:
     return prim
 
 
-def build_stage(ifc_file, geometries: dict, materials: dict, output_path: str, y_up: bool = False) -> None:
-    """geometries / materials から USD ステージを構築し、ファイルへ書き出す。"""
+def build_stage(
+    ifc_file,
+    geometries: dict,
+    materials: dict,
+    output_path: str,
+    y_up: bool = False,
+    scope_ids: set | None = None,
+    scope_record: dict | None = None,
+) -> None:
+    """geometries / materials から USD ステージを構築し、ファイルへ書き出す。
+
+    ``scope_ids`` を渡すと、空間の階層は保ったまま、その集合に入る要素だけを置く。部品だけが範囲に
+    入る集約の親は、階層を保つための空のグループとして置く。``scope_record`` はルートの
+    customData ``ifcScope`` に残す。
+    """
     stage = Usd.Stage.CreateInMemory()
     # IfcOpenShell はジオメトリを常にメートルへ正規化して返すため 1.0 が正しい
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
@@ -166,6 +179,8 @@ def build_stage(ifc_file, geometries: dict, materials: dict, output_path: str, y
 
     # 正規化前の記述単位は USD 側からは復元できないので記録しておく
     model_root.SetCustomDataByKey("ifcLengthUnitScale", get_length_unit_scale(ifc_file))
+    if scope_record is not None:
+        model_root.SetCustomDataByKey("ifcScope", scope_record)
 
     placed: set[str] = set()
 
@@ -173,11 +188,17 @@ def build_stage(ifc_file, geometries: dict, materials: dict, output_path: str, y
         placed.add(props["GlobalId"])
         return append_prim(stage, props, path, geometries, material_prims)
 
+    def in_scope(entity) -> bool:
+        return scope_ids is None or entity.GlobalId in scope_ids
+
     def proc_elements(model, prim):
         for element in _contained_elements(model):
+            children = [c for c in _aggregated_children(element) if in_scope(c)]
+            if not in_scope(element) and not children:
+                continue
             props = get_properties(element)
             elem_prim = place(props, f"{prim.GetPath()}/Element_{props['id']}")
-            for obj_model in _aggregated_children(element):
+            for obj_model in children:
                 props = get_properties(obj_model)
                 place(props, f"{elem_prim.GetPath()}/Object_{props['id']}")
 

@@ -188,7 +188,7 @@ def get_project_info(ifc_file, name: str = "Sample") -> tuple[str, str, str]:
     return name_, lat, lon
 
 
-def get_geometry(settings, ifc_file, materials: dict) -> Iterator[tuple]:
+def get_geometry(settings, ifc_file, materials: dict, scope_ids: Optional[set] = None) -> Iterator[tuple]:
     """対象オブジェクトのジオメトリを1件ずつ生成する（ジェネレータ）。
 
     座標は常に IFC 既定の Z-UP。Y-UP への変換は USD ルートの Xform が担う。
@@ -197,8 +197,17 @@ def get_geometry(settings, ifc_file, materials: dict) -> Iterator[tuple]:
         settings: ifcopenshell のジオメトリ設定
         ifc_file: 対象の IFC ファイル
         materials: マテリアル名→MaterialSpec を蓄積する辞書
+        scope_ids: 出力する要素の GlobalId の集合（``scope.resolve_scope``）。None なら全体
     """
-    iterator = geom.iterator(settings, ifc_file, multiprocessing.cpu_count())
+    if scope_ids is None:
+        iterator = geom.iterator(settings, ifc_file, multiprocessing.cpu_count())
+    else:
+        # 範囲内の要素だけを形状化する。include の解釈（子を辿るか）に依らないよう、下でも GlobalId で絞る
+        include = [ifc_file.by_guid(guid) for guid in sorted(scope_ids)]
+        include = [e for e in include if not any(e.is_a(t) for t in _EXCLUDED_TYPES)]
+        if not include:
+            return
+        iterator = geom.iterator(settings, ifc_file, multiprocessing.cpu_count(), include=include)
 
     if not iterator.initialize():
         return
@@ -209,8 +218,8 @@ def get_geometry(settings, ifc_file, materials: dict) -> Iterator[tuple]:
         shape = iterator.get()
         element = ifc_file.by_guid(shape.guid)
 
-        # 空間系エレメントはジオメトリから除く
-        if any(element.is_a(t) for t in _EXCLUDED_TYPES):
+        # 空間系エレメントと範囲外の要素はジオメトリから除く
+        if any(element.is_a(t) for t in _EXCLUDED_TYPES) or (scope_ids is not None and shape.guid not in scope_ids):
             if not iterator.next():
                 break
             continue
